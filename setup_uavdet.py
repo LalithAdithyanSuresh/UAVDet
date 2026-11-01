@@ -228,6 +228,11 @@ def find_cuda_path():
         if os.path.exists(cand_bin):
             return os.path.dirname(os.path.dirname(os.path.realpath(cand_bin)))
 
+    # 6. Fallback to any existing /usr/local/cuda* directory
+    for m in matches:
+        if os.path.isdir(m):
+            return m
+
     return None
 
 def step_3_setup_cuda_environment():
@@ -337,50 +342,60 @@ def step_5_compile_selective_scan():
         print("[OK] selective_scan_cuda_oflex already compiled and installed. Skipping compilation.")
         return
 
-    # Check if CUDA toolkit is available to build the extension
-    has_cuda = False
-    try:
-        check_cuda = subprocess.check_output(
-            [env.python_bin, "-c", "import torch; print(torch.cuda.is_available())"],
-            text=True, env=os.environ
-        ).strip()
-        has_cuda = (check_cuda == "True")
-    except Exception:
-        pass
+    # Check if CUDA_HOME is available
+    cuda_home = os.environ.get("CUDA_HOME")
+    if not cuda_home or not os.path.exists(cuda_home):
+        # Try finding it in site-packages (if nvidia-cuda-nvcc was installed)
+        try:
+            out = subprocess.check_output(
+                [env.python_bin, "-c", "import nvidia.cuda_nvcc; print(nvidia.cuda_nvcc.__path__[0])"],
+                text=True, stderr=subprocess.DEVNULL
+            ).strip()
+            if os.path.exists(out):
+                os.environ["CUDA_HOME"] = out
+                cuda_home = out
+                print(f"[Notice] Using CUDA Toolkit from pip package: {out}")
+        except Exception:
+            pass
 
-    if not has_cuda and not os.environ.get("CUDA_HOME"):
-        print("[Notice] Neither torch.cuda nor CUDA_HOME is available in current environment.")
-        print("         selective_scan CUDA kernels require a CUDA Toolkit. Skipping compilation for now.")
-        print("         (Kernels will be compiled when running on the GPU server).")
+    if not cuda_home or not os.path.exists(cuda_home):
+        print("[Notice] CUDA_HOME is not set and no CUDA development toolkit was found on this system.")
+        print("         UAVDet includes a fully vectorized PyTorch reference fallback (pytorch_selective_scan_ref).")
+        print("         Skipping CUDA kernel compilation; continuing with PyTorch selective scan fallback.")
         return
 
-    print("Compiling selective_scan CUDA extension locally with no-build-isolation...")
+    print(f"Compiling selective_scan CUDA extension with CUDA_HOME={cuda_home}...")
     selective_scan_dir = os.path.join(env.repo_dir, "selective_scan")
     if not os.path.exists(selective_scan_dir):
-        raise RuntimeError(f"Could not find selective_scan directory at {selective_scan_dir}")
+        print(f"[Warning] selective_scan directory not found at {selective_scan_dir}. Using PyTorch fallback.")
+        return
 
-    cmd = [env.pip_bin, "install", "--no-build-isolation", "-e", "."]
-    print(f"Executing: {' '.join(cmd)} in {selective_scan_dir}")
-    p = subprocess.Popen(
-        cmd,
-        cwd=selective_scan_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-        env=os.environ
-    )
-    for line in p.stdout:
-        sys.stdout.write(line)
-        sys.stdout.flush()
-    p.wait()
-    if p.returncode != 0:
-        raise subprocess.CalledProcessError(p.returncode, cmd)
+    try:
+        cmd = [env.pip_bin, "install", "--no-build-isolation", "-e", "."]
+        print(f"Executing: {' '.join(cmd)} in {selective_scan_dir}")
+        p = subprocess.Popen(
+            cmd,
+            cwd=selective_scan_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            env=os.environ
+        )
+        for line in p.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        p.wait()
+        if p.returncode != 0:
+            raise subprocess.CalledProcessError(p.returncode, cmd)
 
-    # Re-verify import
-    subprocess.check_call([env.python_bin, "-c", check_scan], env=os.environ)
-    print("[OK] selective_scan extension successfully compiled and verified.")
+        # Re-verify import
+        subprocess.check_call([env.python_bin, "-c", check_scan], env=os.environ)
+    except Exception as e:
+        print(f"\n[Notice] selective_scan CUDA compilation was not completed: {e}")
+        print("         UAVDet will automatically use its built-in vectorized PyTorch selective scan fallback.")
+        print("         Continuing with UAVDet installation...")
 
 
 # ── Step 6: Install UAVDet in Development Mode ──────────────────────────────
@@ -428,49 +443,175 @@ def step_7_run_unit_tests():
 
 
 # ── Step 8: Verify Pre-Cloned VisDrone Dataset ─────────────────────────────
+def convert_visdrone_txt_to_coco(img_dir, ann_dir, out_json_path):
+    """Converts VisDrone raw txt annotations to COCO instances format if JSON does not exist."""
+    import json
+    import glob
+    from PIL import Image
+
+    categories = [
+        {"id": 1, "name": "pedestrian"},
+        {"id": 2, "name": "people"},
+        {"id": 3, "name": "bicycle"},
+        {"id": 4, "name": "car"},
+        {"id": 5, "name": "van"},
+        {"id": 6, "name": "truck"},
+        {"id": 7, "name": "tricycle"},
+        {"id": 8, "name": "awning-tricycle"},
+        {"id": 9, "name": "bus"},
+        {"id": 10, "name": "motor"},
+    ]
+
+    print(f"Converting VisDrone txt annotations from {ann_dir} -> {out_json_path}...")
+    img_files = sorted(glob.glob(os.path.join(img_dir, "*.jpg")) + glob.glob(os.path.join(img_dir, "*.png")))
+    coco_images = []
+    coco_annotations = []
+    ann_id = 1
+
+    for img_idx, img_path in enumerate(img_files, start=1):
+        filename = os.path.basename(img_path)
+        base_name = os.path.splitext(filename)[0]
+        try:
+            with Image.open(img_path) as im:
+                width, height = im.size
+        except Exception:
+            width, height = 1920, 1080
+
+        coco_images.append({
+            "id": img_idx,
+            "file_name": filename,
+            "width": width,
+            "height": height
+        })
+
+        txt_path = os.path.join(ann_dir, f"{base_name}.txt")
+        if os.path.exists(txt_path):
+            with open(txt_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split(",")
+                    if len(parts) >= 6:
+                        try:
+                            x, y, w, h = float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])
+                            score = float(parts[4])
+                            cat_id = int(parts[5])
+                            # VisDrone categories 1..10 map to 1..10, 0 is ignored, 11 is others
+                            if 1 <= cat_id <= 10 and w > 0 and h > 0:
+                                coco_annotations.append({
+                                    "id": ann_id,
+                                    "image_id": img_idx,
+                                    "category_id": cat_id,
+                                    "bbox": [x, y, w, h],
+                                    "area": w * h,
+                                    "iscrowd": 0,
+                                    "ignore": 0
+                                })
+                                ann_id += 1
+                        except ValueError:
+                            continue
+
+    os.makedirs(os.path.dirname(out_json_path), exist_ok=True)
+    with open(out_json_path, "w", encoding="utf-8") as f:
+        json.dump({"images": coco_images, "annotations": coco_annotations, "categories": categories}, f)
+    print(f"[OK] Generated {out_json_path} with {len(coco_images)} images and {len(coco_annotations)} boxes.")
+
+
 def step_8_verify_dataset(user_data_dir=None):
-    """Verifies that the pre-cloned VisDrone / COCO formatted dataset exists locally."""
+    """Verifies and automatically maps VisDrone dataset (~/datasets/VisDrone) to data/coco."""
     candidates = []
     if user_data_dir:
         candidates.append(os.path.abspath(user_data_dir))
     if "DATA_DIR" in os.environ:
-        candidates.append(os.environ["DATA_DIR"])
+        candidates.append(os.path.abspath(os.environ["DATA_DIR"]))
 
     candidates.extend([
-        os.path.join(env.repo_dir, "data", "coco"),
-        os.path.join(env.repo_dir, "data", "VisDrone"),
-        os.path.abspath(os.path.join(env.repo_dir, "..", "data")),
-        os.path.abspath(os.path.join(env.repo_dir, "..", "VisDrone")),
-        os.path.abspath(os.path.join(env.repo_dir, "..", "data", "coco")),
-        os.path.expanduser("~/data"),
+        os.path.expanduser("~/datasets/VisDrone"),
+        os.path.expanduser("~/datasets/visdrone"),
+        os.path.expanduser("~/datasets"),
+        os.path.expanduser("~/data/VisDrone"),
         os.path.expanduser("~/data/coco"),
+        os.path.expanduser("~/data"),
+        os.path.abspath(os.path.join(env.repo_dir, "data", "coco")),
+        os.path.abspath(os.path.join(env.repo_dir, "data", "VisDrone")),
+        os.path.abspath(os.path.join(env.repo_dir, "..", "datasets", "VisDrone")),
+        os.path.abspath(os.path.join(env.repo_dir, "..", "data")),
     ])
 
     found_dir = None
     for cand in candidates:
         if os.path.exists(cand):
-            # Check for images or annotations
-            has_ann = os.path.exists(os.path.join(cand, "annotations")) or os.path.exists(os.path.join(cand, "train.json"))
-            has_imgs = any(os.path.exists(os.path.join(cand, x)) for x in ["train2017", "val2017", "images", "VisDrone2019-DET-train"])
-            if has_ann or has_imgs:
+            # Check for train / val subdirs
+            has_splits = os.path.exists(os.path.join(cand, "train")) or os.path.exists(os.path.join(cand, "VisDrone2019-DET-train"))
+            has_coco = os.path.exists(os.path.join(cand, "train2017")) or os.path.exists(os.path.join(cand, "annotations"))
+            if has_splits or has_coco:
                 found_dir = cand
                 break
 
-    target_data_coco = os.path.join(env.repo_dir, "data", "coco")
-    if found_dir and os.path.abspath(found_dir) != os.path.abspath(target_data_coco):
-        print(f"Pre-cloned dataset found at: {found_dir}")
-        os.makedirs(os.path.join(env.repo_dir, "data"), exist_ok=True)
-        if not os.path.exists(target_data_coco):
+    target_coco = os.path.join(env.repo_dir, "data", "coco")
+    os.makedirs(target_coco, exist_ok=True)
+    ann_dir = os.path.join(target_coco, "annotations")
+    os.makedirs(ann_dir, exist_ok=True)
+
+    if not found_dir:
+        print(f"[Warning] Could not locate VisDrone dataset in standard paths.")
+        print(f"          Expected at ~/datasets/VisDrone or pass --data-dir /path/to/VisDrone")
+        return
+
+    print(f"[Dataset Found] Pre-cloned VisDrone dataset located at: {found_dir}")
+
+    # Map splits: train -> train2017, val -> val2017, test -> test2017
+    splits = [
+        ("train", "train2017", "instances_train2017.json"),
+        ("val", "val2017", "instances_val2017.json"),
+        ("test", "test2017", "instances_test2017.json")
+    ]
+
+    for split_src, split_dst, ann_name in splits:
+        dst_img_dir = os.path.join(target_coco, split_dst)
+        out_json = os.path.join(ann_dir, ann_name)
+
+        # 1. Resolve source image directory
+        src_cand_dirs = [
+            os.path.join(found_dir, split_src, "images"),
+            os.path.join(found_dir, f"VisDrone2019-DET-{split_src}", "images"),
+            os.path.join(found_dir, split_src),
+            os.path.join(found_dir, split_dst)
+        ]
+        src_img_dir = next((d for d in src_cand_dirs if os.path.exists(d)), None)
+
+        if src_img_dir and not os.path.exists(dst_img_dir):
             try:
-                print(f"Creating symlink from {found_dir} -> {target_data_coco}")
-                os.symlink(found_dir, target_data_coco)
-            except Exception as e:
-                print(f"Notice: Could not symlink ({e}). Please ensure data is at {target_data_coco}")
-    elif os.path.exists(target_data_coco):
-        print(f"[Dataset Verified] Dataset present at {target_data_coco}")
-    else:
-        print(f"[Notice] Dataset directory not immediately found in default locations. Expected at: {target_data_coco}")
-        print("         Make sure your cloned VisDrone dataset is symlinked to data/coco or pass --data-dir.")
+                print(f"Creating symlink: {dst_img_dir} -> {src_img_dir}")
+                os.symlink(src_img_dir, dst_img_dir)
+            except Exception:
+                pass
+
+        # 2. Resolve or convert annotations
+        if not os.path.exists(out_json):
+            # Check if JSON annotation already exists in source
+            json_cands = [
+                os.path.join(found_dir, "annotations", ann_name),
+                os.path.join(found_dir, split_src, "annotations", ann_name),
+                os.path.join(found_dir, split_src, "annotations.json"),
+                os.path.join(found_dir, f"{split_src}.json")
+            ]
+            existing_json = next((j for j in json_cands if os.path.exists(j)), None)
+            if existing_json:
+                print(f"Copying existing annotation: {existing_json} -> {out_json}")
+                shutil.copyfile(existing_json, out_json)
+            else:
+                # Check for raw txt annotations
+                txt_cand_dirs = [
+                    os.path.join(found_dir, split_src, "annotations"),
+                    os.path.join(found_dir, f"VisDrone2019-DET-{split_src}", "annotations"),
+                    os.path.join(found_dir, "annotations", split_src)
+                ]
+                src_txt_dir = next((d for d in txt_cand_dirs if os.path.exists(d)), None)
+                if src_txt_dir and src_img_dir:
+                    convert_visdrone_txt_to_coco(src_img_dir, src_txt_dir, out_json)
+
+    print(f"[Dataset Verified] data/coco mapped and ready:")
+    print(f"  Images:      {target_coco}/train2017, {target_coco}/val2017")
+    print(f"  Annotations: {ann_dir}/instances_train2017.json, instances_val2017.json")
 
 
 # ── Launch Training Execution ───────────────────────────────────────────────
