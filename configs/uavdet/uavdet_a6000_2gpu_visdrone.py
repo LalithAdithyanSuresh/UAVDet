@@ -165,4 +165,8 @@ default_hooks = dict(
 
 log_processor = dict(type='LogProcessor', window_size=1, by_epoch=True)
 
+# DDP: Enable find_unused_parameters to safely handle multi-branch modules
+find_unused_parameters = True
+model_wrapper_cfg = dict(type='MMDistributedDataParallel', find_unused_parameters=True)
+
 work_dir = './work_dirs/uavdet_a6000_2gpu_visdrone'

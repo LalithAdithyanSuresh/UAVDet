@@ -201,9 +201,12 @@ class BG_VSSBlock(VSSBlock):
             )
 
     def forward(self, input: torch.Tensor, s_map: torch.Tensor = None) -> torch.Tensor:
-        x = self.proj_conv(input)
-        if self.ssm_branch:
-            x = x + self.drop_path(self.op(self.norm(x), s_map=s_map))
+        input = self.proj_conv(input)
+        if hasattr(self, 'lsblock') and self.lsblock is not None:
+            X1 = self.lsblock(input)
+        else:
+            X1 = input
+        x = input + self.drop_path(self.op(self.norm(X1), s_map=s_map))
         if self.mlp_branch:
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
