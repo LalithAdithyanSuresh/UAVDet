@@ -158,7 +158,7 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=1),
     param_scheduler=dict(type='ParamSchedulerHook'),
-, interv    checkpoint=dict(type='CheckpointHook'al=10, max_keep_ckpts=3, save_best='auto'),
+    checkpoint=dict(type='CheckpointHook', interval=10, max_keep_ckpts=3, save_best='auto'),
     sampler_seed=dict(type='DistSamplerSeedHook'),
     visualization=dict(type='DetVisualizationHook')
 )
