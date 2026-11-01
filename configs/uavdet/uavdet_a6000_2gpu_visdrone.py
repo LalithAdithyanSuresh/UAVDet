@@ -79,32 +79,33 @@ model = dict(
 # ==============================================================================
 # Hardware Optimization: 2x RTX A6000 (46GB VRAM each)
 # ==============================================================================
-# High batch size enabled by 46GB VRAM: 16 per GPU * 2 GPUs = 32 per forward step
-# Container has hard-capped 64MB /dev/shm. num_workers=0 loads data directly in main process without /dev/shm
+# High-throughput batch size with gradient accumulation:
+# batch_size=4 per GPU * 2 GPUs = 8 per step
+# accumulative_counts=16: 8 * 16 = 128 effective batch size per optimizer step
 train_dataloader = dict(
-    batch_size=16,
+    batch_size=4,
     num_workers=0,
     persistent_workers=False,
     pin_memory=True)
 
 val_dataloader = dict(
-    batch_size=8,
+    batch_size=4,
     num_workers=0,
     persistent_workers=False)
 
 test_dataloader = dict(
-    batch_size=8,
+    batch_size=4,
     num_workers=0,
     persistent_workers=False)
 
 # Mixed Precision & Gradient Accumulation
-# accumulative_counts=4: Merges both GPUs' parameter updates every 4 iterations
-# Effective Batch Size = 16 (per GPU) * 2 (GPUs) * 4 (accum) = 128 images per update
+# accumulative_counts=16: Merges both GPUs' parameter updates every 16 iterations
+# Effective Batch Size = 4 (per GPU) * 2 (GPUs) * 16 (accum) = 128 images per update
 optim_wrapper = dict(
     type='AmpOptimWrapper',
     dtype='float16',
     loss_scale='dynamic',
-    accumulative_counts=4,
+    accumulative_counts=16,
     optimizer=dict(type='AdamW', lr=0.002, weight_decay=0.05),
     paramwise_cfg=dict(
         norm_decay_mult=0.0,

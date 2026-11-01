@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import repeat
 
-from .common_utils_mbyolo import LayerNorm2d, CrossScan, CrossMerge, SelectiveScanCore
+from .common_utils_mbyolo import LayerNorm2d, CrossScan, CrossMerge, SelectiveScanCore, pytorch_selective_scan_ref
 from .mamba_yolo import SS2D, VSSBlock
 
 # Check whether compiled CUDA selective_scan is available
@@ -17,65 +17,6 @@ try:
     CUDA_SCAN_AVAILABLE = True
 except Exception:
     CUDA_SCAN_AVAILABLE = False
-
-
-def pytorch_selective_scan_ref(u, delta, A, B, C, D=None):
-    """Pure PyTorch vectorized implementation of selective scan recurrence.
-
-    Used when CUDA kernels are unavailable or during CPU testing.
-    Recurrence:
-        h_t = exp(delta_t * A) * h_{t-1} + delta_t * B_t * u_t
-        y_t = sum(h_t * C_t, dim=-1) + D * u_t
-    """
-    Bsz, Ddim, L = u.shape
-    N = A.shape[1]
-    dtype = u.dtype
-    device = u.device
-
-    u = u.float()
-    delta = delta.float()
-    A = A.float()
-    B = B.float()
-    C = C.float()
-
-    # Precompute dA and dBu
-    # delta: (B, D, L) -> (B, D, N, L)
-    # A: (D, N) -> (1, D, N, 1)
-    dA = torch.exp(delta.unsqueeze(2) * A.unsqueeze(0).unsqueeze(-1))  # (B, D, N, L)
-
-    # B can be (B, N, L) or (B, G, N, L) where G is number of groups (e.g. 4)
-    if B.dim() == 4:
-        # Repeat B and C across channels per group: G * H = Ddim
-        H_mult = Ddim // B.shape[1]
-        B = repeat(B, "B G N L -> B (G H) N L", H=H_mult)
-        dBu = delta.unsqueeze(2) * B * u.unsqueeze(2)  # (B, D, N, L)
-    elif B.dim() == 3:
-        dBu = delta.unsqueeze(2) * B.unsqueeze(1) * u.unsqueeze(2)  # (B, D, N, L)
-    else:
-        dBu = delta.unsqueeze(2) * B * u.unsqueeze(2)
-
-    if C.dim() == 4:
-        H_mult = Ddim // C.shape[1]
-        C = repeat(C, "B G N L -> B (G H) N L", H=H_mult)
-
-    h = torch.zeros(Bsz, Ddim, N, dtype=torch.float32, device=device)
-    ys = []
-
-    for t in range(L):
-        h = dA[..., t] * h + dBu[..., t]
-        if C.dim() == 4:
-            y_t = (h * C[:, :, :, t]).sum(dim=-1)
-        elif C.dim() == 3:
-            y_t = (h * C[:, None, :, t]).sum(dim=-1)
-        else:
-            y_t = (h * C[:, :, :, t]).sum(dim=-1)
-        if D is not None:
-            y_t = y_t + D.view(1, -1) * u[:, :, t]
-        ys.append(y_t)
-
-
-    y = torch.stack(ys, dim=-1)  # (B, D, L)
-    return y.to(dtype)
 
 
 def boundary_gated_cross_selective_scan(

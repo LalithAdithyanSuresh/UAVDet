@@ -100,8 +100,8 @@ class CrossMerge(torch.autograd.Function):
 
 
 def pytorch_selective_scan_ref(u, delta, A, B, C, D=None):
-    """Pure PyTorch vectorized implementation of selective scan recurrence.
-    Used when CUDA kernels are unavailable or during CPU/fallback execution.
+    """Memory-optimized streaming PyTorch selective scan recurrence.
+    Eliminates multi-gigabyte (B, D, N, L) intermediate tensor allocations during forward and backward.
     """
     Bsz, Ddim, L = u.shape
     N = A.shape[1]
@@ -114,32 +114,32 @@ def pytorch_selective_scan_ref(u, delta, A, B, C, D=None):
     B = B.float()
     C = C.float()
 
-    dA = torch.exp(delta.unsqueeze(2) * A.unsqueeze(0).unsqueeze(-1))  # (B, D, N, L)
-
-    if B.dim() == 4:
-        H_mult = Ddim // B.shape[1]
-        B = repeat(B, "B G N L -> B (G H) N L", H=H_mult)
-        dBu = delta.unsqueeze(2) * B * u.unsqueeze(2)
-    elif B.dim() == 3:
-        dBu = delta.unsqueeze(2) * B.unsqueeze(1) * u.unsqueeze(2)
-    else:
-        dBu = delta.unsqueeze(2) * B * u.unsqueeze(2)
-
-    if C.dim() == 4:
-        H_mult = Ddim // C.shape[1]
-        C = repeat(C, "B G N L -> B (G H) N L", H=H_mult)
-
-    h = torch.zeros(Bsz, Ddim, N, dtype=torch.float32, device=device)
+    h = torch.zeros(Bsz, Ddim, N, device=device, dtype=torch.float32)
     ys = []
+    is_B_group = (B.dim() == 4)
+    is_C_group = (C.dim() == 4)
+    H_mult = (Ddim // B.shape[1]) if is_B_group else 1
 
+    A_expanded = A.unsqueeze(0)  # (1, D, N)
     for t in range(L):
-        h = dA[..., t] * h + dBu[..., t]
-        if C.dim() == 4:
-            y_t = (h * C[:, :, :, t]).sum(dim=-1)
-        elif C.dim() == 3:
-            y_t = (h * C[:, None, :, t]).sum(dim=-1)
+        delta_t = delta[:, :, t, None]  # (B, D, 1)
+        dA_t = torch.exp(delta_t * A_expanded)  # (B, D, N)
+        u_t = u[:, :, t, None]  # (B, D, 1)
+        if is_B_group:
+            B_t = B[:, :, :, t].repeat_interleave(H_mult, dim=1)  # (B, D, N)
+        elif B.dim() == 3:
+            B_t = B[:, None, :, t]  # (B, 1, N)
         else:
-            y_t = (h * C[:, :, :, t]).sum(dim=-1)
+            B_t = B[:, :, :, t]
+        dBu_t = delta_t * B_t * u_t  # (B, D, N)
+        h = dA_t * h + dBu_t
+        if is_C_group:
+            C_t = C[:, :, :, t].repeat_interleave(H_mult, dim=1)
+        elif C.dim() == 3:
+            C_t = C[:, None, :, t]
+        else:
+            C_t = C[:, :, :, t]
+        y_t = (h * C_t).sum(dim=-1)
         if D is not None:
             y_t = y_t + D.view(1, -1) * u[:, :, t]
         ys.append(y_t)

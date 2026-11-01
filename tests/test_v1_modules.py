@@ -74,6 +74,7 @@ def test_log_kernel():
 
 def test_log_prior():
     print("Testing LoGPrior module...")
+    torch.manual_seed(42)
     prior_module = LoGPrior(sigmas=(1.5, 3.0, 6.0), out_channels=1)
     x = torch.randn(2, 3, 128, 128)
     out = prior_module(x)
