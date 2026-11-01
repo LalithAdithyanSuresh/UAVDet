@@ -6,6 +6,8 @@ import sys
 import types
 import warnings
 
+import importlib.machinery
+
 # Ensure fallback for mmcv._ext if compiled C++ ops are not present
 try:
     import mmcv._ext
@@ -17,7 +19,10 @@ except Exception:
             def _dummy_op(*args, **kwargs):
                 return None
             return _dummy_op
-    sys.modules["mmcv._ext"] = _FallbackMMCVExt("mmcv._ext")
+    _ext_mod = _FallbackMMCVExt("mmcv._ext")
+    _ext_mod.__spec__ = importlib.machinery.ModuleSpec("mmcv._ext", loader=None)
+    _ext_mod.__loader__ = None
+    sys.modules["mmcv._ext"] = _ext_mod
 
 from mmengine.config import Config, DictAction
 from mmengine.registry import RUNNERS
