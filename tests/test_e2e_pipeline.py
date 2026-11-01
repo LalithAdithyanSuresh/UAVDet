@@ -8,7 +8,7 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, repo_root)
 
 # Setup mock for mmcv/mmengine if running in environment without compiled C-extensions
-for mod_name in ['mmcv', 'mmcv.cnn', 'mmcv.ops', 'mmcv.ops.nms', 'mmcv.ops.roi_align', 'mmengine', 'mmengine.model', 'mmengine.utils', 'mmengine.structures', 'mmengine.hooks', 'mmengine.fileio', 'mmengine.dist', 'mmengine.logging', 'mmengine.registry', 'mmengine.config']:
+for mod_name in ['mmcv', 'mmcv.cnn', 'mmcv.ops', 'mmcv.ops.nms', 'mmcv.ops.roi_align', 'mmengine', 'mmengine.model', 'mmengine.utils', 'mmengine.utils.dl_utils', 'mmengine.structures', 'mmengine.hooks', 'mmengine.fileio', 'mmengine.dist', 'mmengine.logging', 'mmengine.registry', 'mmengine.config']:
     if mod_name not in sys.modules:
         try:
             __import__(mod_name)

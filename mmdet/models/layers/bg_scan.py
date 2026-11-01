@@ -189,6 +189,10 @@ class BG_SS2D(SS2D):
     Flushes Mamba memory when crossing structural boundaries.
     """
 
+    def __init__(self, d_model=96, *args, **kwargs):
+        super().__init__(d_model=d_model, *args, **kwargs)
+        self.d_model = d_model
+
     def forward_corev2(self, x: torch.Tensor, s_map: torch.Tensor = None, channel_first=False,
                        SelectiveScan=SelectiveScanCore, force_fp32=None):
         force_fp32 = (self.training and (not self.disable_force32)) if force_fp32 is None else force_fp32
@@ -222,7 +226,7 @@ class BG_SS2D(SS2D):
             x_proj, z = x_proj.chunk(2, dim=1)
             if not self.disable_z_act:
                 z1 = self.act(z)
-        if self.d_conv > 0:
+        if self.d_conv > 0 and hasattr(self, 'conv2d'):
             x_proj = self.conv2d(x_proj)
         x_proj = self.act(x_proj)
 
@@ -236,13 +240,16 @@ class BG_SS2D(SS2D):
 class BG_VSSBlock(VSSBlock):
     """Boundary-Gated Visual State-Space Block (BG-VSSBlock)."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, in_channels: int = 0, hidden_dim: int = 0, *args, **kwargs):
+        super().__init__(in_channels=in_channels, hidden_dim=hidden_dim, *args, **kwargs)
+        self.in_channels = in_channels
+        self.hidden_dim = hidden_dim
         # Replace internal SS2D with BG_SS2D
         if self.ssm_branch:
             old_op = self.op
+            dim = hidden_dim if hidden_dim > 0 else (in_channels if in_channels > 0 else getattr(old_op.in_proj, 'in_channels', 96))
             self.op = BG_SS2D(
-                d_model=old_op.d_model if hasattr(old_op, 'd_model') else kwargs.get('hidden_dim', 0),
+                d_model=dim,
                 d_state=old_op.d_state,
                 ssm_ratio=2.0,
                 ssm_rank_ratio=2.0,

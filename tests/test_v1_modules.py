@@ -58,6 +58,7 @@ generate_log_kernel = log_prior_mod.generate_log_kernel
 # 4. Import bg_scan
 bg_scan_mod = import_module_from_file('bg_scan', os.path.join(layers_dir, 'bg_scan.py'))
 BG_SS2D = bg_scan_mod.BG_SS2D
+BG_VSSBlock = bg_scan_mod.BG_VSSBlock
 boundary_gated_cross_selective_scan = bg_scan_mod.boundary_gated_cross_selective_scan
 pytorch_selective_scan_ref = bg_scan_mod.pytorch_selective_scan_ref
 
@@ -161,6 +162,17 @@ def test_exact_delta_decomposition_math():
 
 
 
+def test_bg_vssblock():
+    print("Testing BG_VSSBlock instantiation and forward pass...")
+    block = BG_VSSBlock(96, 96)
+    x = torch.randn(2, 96, 32, 32)
+    s_map = torch.rand(2, 1, 32, 32) * 2.0
+    out = block(x, s_map=s_map)
+    assert out.shape == (2, 96, 32, 32), f"Expected (2, 96, 32, 32), got {out.shape}"
+    assert not torch.isnan(out).any(), "Found NaNs in BG_VSSBlock output"
+    print(f"BG_VSSBlock forward output shape: {out.shape} -> PASSED")
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("Running UAVDet V1 Mathematical & Architectural Unit Tests")
@@ -169,6 +181,7 @@ if __name__ == '__main__':
     test_log_prior()
     test_boundary_head()
     test_bg_ss2d_forward()
+    test_bg_vssblock()
     test_exact_delta_decomposition_math()
     print("=" * 60)
     print("ALL TESTS PASSED SUCCESSFULLY!")
