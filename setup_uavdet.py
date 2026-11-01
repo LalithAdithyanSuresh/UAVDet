@@ -330,6 +330,44 @@ def step_4_verify_pytorch_deps():
             print(f"  Installing missing requirement: {pip_name}...")
             subprocess.check_call([env.pip_bin, "install", pip_name], env=os.environ)
 
+    # 4. Check and install mmcv (required by MMDetection)
+    has_mmcv = False
+    try:
+        out = subprocess.check_output(
+            [env.python_bin, "-c", "import mmcv; print(mmcv.__version__)"],
+            text=True, stderr=subprocess.DEVNULL, env=os.environ
+        ).strip()
+        print(f"  mmcv is present (version {out}).")
+        has_mmcv = True
+    except Exception:
+        has_mmcv = False
+
+    if not has_mmcv:
+        print("  Installing mmcv into local venv...")
+        installed = False
+        for pkg_cand in ["mmcv>=2.0.0rc4,<2.2.0", "mmcv-lite>=2.0.0rc4,<2.2.0", "mmcv-lite"]:
+            try:
+                print(f"  Trying: {env.pip_bin} install '{pkg_cand}'...")
+                subprocess.check_call([env.pip_bin, "install", pkg_cand], env=os.environ)
+                # Verify import
+                subprocess.check_call([env.python_bin, "-c", "import mmcv"], env=os.environ)
+                print(f"[OK] Successfully installed {pkg_cand}")
+                installed = True
+                break
+            except Exception as e:
+                print(f"  Notice: {pkg_cand} could not be installed directly ({e}), checking alternative...")
+                continue
+
+        if not installed:
+            try:
+                print("  Trying installation via openmim...")
+                subprocess.check_call([env.pip_bin, "install", "openmim"], env=os.environ)
+                mim_cand = os.path.join(os.path.dirname(env.pip_bin), "mim")
+                mim_exec = mim_cand if os.path.exists(mim_cand) else "mim"
+                subprocess.check_call([mim_exec, "install", "mmcv"], env=os.environ)
+            except Exception as e:
+                print(f"  openmim fallback notice: {e}")
+
     print("  Build and runtime prerequisites verified.")
 
 
