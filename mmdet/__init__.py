@@ -1,4 +1,20 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import sys
+import types
+import warnings
+
+# Ensure fallback for mmcv._ext if compiled C++ ops are not present
+try:
+    import mmcv._ext
+except Exception:
+    class _FallbackMMCVExt(types.ModuleType):
+        def __getattr__(self, name):
+            def _dummy_op(*args, **kwargs):
+                warnings.warn(f"MMCV C++ op '{name}' was called but mmcv._ext is not compiled.", UserWarning)
+                return None
+            return _dummy_op
+    sys.modules["mmcv._ext"] = _FallbackMMCVExt("mmcv._ext")
+
 import mmcv
 import mmengine
 from mmengine.utils import digit_version
