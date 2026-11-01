@@ -154,4 +154,8 @@ custom_hooks = [
         priority=51)
 ]
 
+default_hooks = dict(
+    logger=dict(type='LoggerHook', interval=5)
+)
+
 work_dir = './work_dirs/uavdet_a6000_2gpu_visdrone'
