@@ -255,6 +255,7 @@ def step_3_setup_cuda_environment():
 
     # Optimized PyTorch memory settings for RTX A6000 (46GB VRAM)
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    os.environ["TORCH_SHM_STRATEGY"] = "file_system"
     os.environ["MAX_JOBS"] = str(min(os.cpu_count() or 4, 8))
     os.environ["PIP_NO_CACHE_DIR"] = "1"
     os.environ["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"

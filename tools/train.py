@@ -24,6 +24,12 @@ except Exception:
     _ext_mod.__loader__ = None
     sys.modules["mmcv._ext"] = _ext_mod
 
+import torch.multiprocessing
+try:
+    torch.multiprocessing.set_sharing_strategy('file_system')
+except Exception:
+    pass
+
 from mmengine.config import Config, DictAction
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
