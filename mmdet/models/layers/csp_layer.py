@@ -321,3 +321,82 @@ class CSPLayerMB(BaseModule):
         if self.channel_attention:
             x_final = self.attention(x_final)
         return self.final_conv(x_final)
+
+
+class CSPLayerBGMB(BaseModule):
+    """Boundary-Gated Cross Stage Partial Mamba Layer.
+
+    Extends CSPLayerMB by routing a structural boundary flush gate s_map >= 0
+    to the internal BG_VSSBlock to prevent memory bleeding across aerial targets.
+    """
+
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 expand_ratio: float = 0.5,
+                 num_blocks: int = 1,
+                 add_identity: bool = True,
+                 use_depthwise: bool = False,
+                 use_cspnext_block: bool = False,
+                 channel_attention: bool = False,
+                 conv_cfg: OptConfigType = None,
+                 norm_cfg: ConfigType = dict(
+                     type='BN', momentum=0.03, eps=0.001),
+                 act_cfg: ConfigType = dict(type='Swish'),
+                 init_cfg: OptMultiConfig = None) -> None:
+        super().__init__(init_cfg=init_cfg)
+        from .bg_scan import BG_VSSBlock
+        block = CSPNeXtBlock if use_cspnext_block else DarknetBottleneck
+        mid_channels = int(out_channels * expand_ratio)
+        self.channel_attention = channel_attention
+        self.main_conv = ConvModule(
+            in_channels,
+            mid_channels,
+            1,
+            conv_cfg=conv_cfg,
+            norm_cfg=norm_cfg,
+            act_cfg=act_cfg)
+        self.short_conv = ConvModule(
+            in_channels,
+            mid_channels,
+            1,
+            conv_cfg=conv_cfg,
+            norm_cfg=norm_cfg,
+            act_cfg=act_cfg)
+
+        self.final_conv = ConvModule(
+            2 * mid_channels,
+            out_channels,
+            1,
+            conv_cfg=conv_cfg,
+            norm_cfg=norm_cfg,
+            act_cfg=act_cfg)
+        self.mamba = BG_VSSBlock(mid_channels, mid_channels)
+
+        self.blocks = nn.Sequential(*[
+            block(
+                mid_channels,
+                mid_channels,
+                1.0,
+                add_identity,
+                use_depthwise,
+                conv_cfg=conv_cfg,
+                norm_cfg=norm_cfg,
+                act_cfg=act_cfg) for _ in range(num_blocks)
+        ])
+        if channel_attention:
+            self.attention = ChannelAttention(2 * mid_channels)
+
+    def forward(self, x: Tensor, s_map: Tensor = None) -> Tensor:
+        """Forward function."""
+        x_short = self.short_conv(x)
+        x_main = self.main_conv(x)
+
+        x_long = self.mamba(x_short, s_map=s_map) + x_short
+        x_main = self.blocks(x_main) + x_main
+
+        x_final = torch.cat((x_long, x_main), dim=1)
+
+        if self.channel_attention:
+            x_final = self.attention(x_final)
+        return self.final_conv(x_final)

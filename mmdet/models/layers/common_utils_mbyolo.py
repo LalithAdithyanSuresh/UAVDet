@@ -21,11 +21,14 @@ try:
     "sscore acts the same as mamba_ssm"
     import selective_scan_cuda_core
 except Exception as e:
-    print(e, flush=True)
     "you should install mamba_ssm to use this"
     SSMODE = "mamba_ssm"
-    import selective_scan_cuda
-    # from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
+    try:
+        import selective_scan_cuda
+    except Exception:
+        selective_scan_cuda = None
+        selective_scan_cuda_core = None
+
 
 
 class LayerNorm2d(nn.Module):

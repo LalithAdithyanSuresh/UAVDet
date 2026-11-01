@@ -4,7 +4,10 @@ from .bbox_nms import fast_nms, multiclass_nms
 from .brick_wrappers import (AdaptiveAvgPool2d, FrozenBatchNorm2d,
                              adaptive_avg_pool2d)
 from .conv_upsample import ConvUpsample
-from .csp_layer import CSPLayer, CSPLayerMB
+from .csp_layer import CSPLayer, CSPLayerMB, CSPLayerBGMB
+from .log_prior import LoGPrior, BoundaryHead
+from .bg_scan import BG_SS2D, BG_VSSBlock
+
 from .dropblock import DropBlock
 from .ema import ExpMomentumEMA
 from .inverted_residual import InvertedResidual
@@ -60,6 +63,7 @@ __all__ = [
     'ConditionalDetrTransformerDecoder',
     'ConditionalDetrTransformerDecoderLayer', 'DinoTransformerDecoder',
     'CdnQueryGenerator', 'Mask2FormerTransformerEncoder',
-    'Mask2FormerTransformerDecoderLayer', 'Mask2FormerTransformerDecoder',
-    'SinePositionalEncoding3D', 'FrozenBatchNorm2d', 'CSPLayerMB'
+    'SinePositionalEncoding3D', 'FrozenBatchNorm2d', 'CSPLayerMB',
+    'CSPLayerBGMB', 'LoGPrior', 'BoundaryHead', 'BG_SS2D', 'BG_VSSBlock'
 ]
+
