@@ -99,6 +99,55 @@ class CrossMerge(torch.autograd.Function):
         return xs, None, None
 
 
+def pytorch_selective_scan_ref(u, delta, A, B, C, D=None):
+    """Pure PyTorch vectorized implementation of selective scan recurrence.
+    Used when CUDA kernels are unavailable or during CPU/fallback execution.
+    """
+    Bsz, Ddim, L = u.shape
+    N = A.shape[1]
+    dtype = u.dtype
+    device = u.device
+
+    u = u.float()
+    delta = delta.float()
+    A = A.float()
+    B = B.float()
+    C = C.float()
+
+    dA = torch.exp(delta.unsqueeze(2) * A.unsqueeze(0).unsqueeze(-1))  # (B, D, N, L)
+
+    if B.dim() == 4:
+        H_mult = Ddim // B.shape[1]
+        B = repeat(B, "B G N L -> B (G H) N L", H=H_mult)
+        dBu = delta.unsqueeze(2) * B * u.unsqueeze(2)
+    elif B.dim() == 3:
+        dBu = delta.unsqueeze(2) * B.unsqueeze(1) * u.unsqueeze(2)
+    else:
+        dBu = delta.unsqueeze(2) * B * u.unsqueeze(2)
+
+    if C.dim() == 4:
+        H_mult = Ddim // C.shape[1]
+        C = repeat(C, "B G N L -> B (G H) N L", H=H_mult)
+
+    h = torch.zeros(Bsz, Ddim, N, dtype=torch.float32, device=device)
+    ys = []
+
+    for t in range(L):
+        h = dA[..., t] * h + dBu[..., t]
+        if C.dim() == 4:
+            y_t = (h * C[:, :, :, t]).sum(dim=-1)
+        elif C.dim() == 3:
+            y_t = (h * C[:, None, :, t]).sum(dim=-1)
+        else:
+            y_t = (h * C[:, :, :, t]).sum(dim=-1)
+        if D is not None:
+            y_t = y_t + D.view(1, -1) * u[:, :, t]
+        ys.append(y_t)
+
+    y = torch.stack(ys, dim=-1)
+    return y.to(dtype)
+
+
 # cross selective scan ===============================
 class SelectiveScanCore(torch.autograd.Function):
     # comment all checks if inside cross_selective_scan
@@ -106,6 +155,12 @@ class SelectiveScanCore(torch.autograd.Function):
     @torch.cuda.amp.custom_fwd
     def forward(ctx, u, delta, A, B, C, D=None, delta_bias=None, delta_softplus=False, nrows=1, backnrows=1,
                 oflex=True):
+        if selective_scan_cuda_core is None or not u.is_cuda:
+            if delta_bias is not None:
+                delta = delta + delta_bias.view(1, -1, 1)
+            if delta_softplus:
+                delta = torch.nn.functional.softplus(delta)
+            return pytorch_selective_scan_ref(u, delta, A, B, C, D=D)
         # all in float
         if u.stride(-1) != 1:
             u = u.contiguous()
@@ -132,6 +187,8 @@ class SelectiveScanCore(torch.autograd.Function):
     @staticmethod
     @torch.cuda.amp.custom_bwd
     def backward(ctx, dout, *args):
+        if selective_scan_cuda_core is None:
+            return (None, None, None, None, None, None, None, None, None, None, None)
         u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
@@ -168,6 +225,12 @@ def cross_selective_scan(
     L = H * W
 
     def selective_scan(u, delta, A, B, C, D=None, delta_bias=None, delta_softplus=True):
+        if selective_scan_cuda_core is None or not u.is_cuda:
+            if delta_bias is not None:
+                delta = delta + delta_bias.view(1, -1, 1)
+            if delta_softplus:
+                delta = torch.nn.functional.softplus(delta)
+            return pytorch_selective_scan_ref(u, delta, A, B, C, D=D)
         return SelectiveScan.apply(u, delta, A, B, C, D, delta_bias, delta_softplus, nrows, backnrows, ssoflex)
 
     xs = CrossScan.apply(x)
