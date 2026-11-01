@@ -80,22 +80,22 @@ model = dict(
 # Hardware Optimization: 2x RTX A6000 (46GB VRAM each)
 # ==============================================================================
 # High batch size enabled by 46GB VRAM: 16 per GPU * 2 GPUs = 32 per forward step
-# num_workers set to 4 per GPU to prevent container /dev/shm shared memory exhaustion
+# Container has hard-capped 64MB /dev/shm. num_workers=0 loads data directly in main process without /dev/shm
 train_dataloader = dict(
     batch_size=16,
-    num_workers=4,
-    persistent_workers=True,
+    num_workers=0,
+    persistent_workers=False,
     pin_memory=True)
 
 val_dataloader = dict(
     batch_size=8,
-    num_workers=2,
-    persistent_workers=True)
+    num_workers=0,
+    persistent_workers=False)
 
 test_dataloader = dict(
     batch_size=8,
-    num_workers=2,
-    persistent_workers=True)
+    num_workers=0,
+    persistent_workers=False)
 
 # Mixed Precision & Gradient Accumulation
 # accumulative_counts=4: Merges both GPUs' parameter updates every 4 iterations
