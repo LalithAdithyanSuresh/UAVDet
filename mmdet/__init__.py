@@ -9,8 +9,9 @@ try:
 except Exception:
     class _FallbackMMCVExt(types.ModuleType):
         def __getattr__(self, name):
+            if name.startswith("__") and name.endswith("__"):
+                raise AttributeError(f"module 'mmcv._ext' has no attribute '{name}'")
             def _dummy_op(*args, **kwargs):
-                warnings.warn(f"MMCV C++ op '{name}' was called but mmcv._ext is not compiled.", UserWarning)
                 return None
             return _dummy_op
     sys.modules["mmcv._ext"] = _FallbackMMCVExt("mmcv._ext")
