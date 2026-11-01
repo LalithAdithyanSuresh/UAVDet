@@ -1,0 +1,6 @@
+[2026-11-01 15:12:52] Status: FAILED | Duration: 0s | Error: Could not locate a local Python virtual environment in candidates:
+ - D:\_CAPSTONE\venv
+ - D:\_CAPSTONE\UAV-DET\venv
+ - C:\Users\lalit\AppData\Local\Programs\Python\Python310
+Please specify with: python setup_uavdet.py --venv /path/to/venv
+[2026-11-01 15:13:46] Status: FAILED | Duration: 13s | Error: Command '['C:\\Users\\lalit\\AppData\\Local\\Programs\\Python\\Python310\\Scripts\\pip.exe', 'install', '--no-build-isolation', '-e', '.']' returned non-zero exit status 1.
