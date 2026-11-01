@@ -42,13 +42,20 @@ def gen_gaussian_target(heatmap, center, radius, k=1):
     Returns:
         out_heatmap (Tensor): Updated heatmap covered by gaussian kernel.
     """
+    radius = int(radius)
+    if radius <= 0:
+        return heatmap
+
     diameter = 2 * radius + 1
     gaussian_kernel = gaussian2D(
         radius, sigma=diameter / 6, dtype=heatmap.dtype, device=heatmap.device)
 
-    x, y = center
+    x, y = int(round(float(center[0]))), int(round(float(center[1])))
 
     height, width = heatmap.shape[:2]
+
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return heatmap
 
     left, right = min(x, radius), min(width - x, radius + 1)
     top, bottom = min(y, radius), min(height - y, radius + 1)

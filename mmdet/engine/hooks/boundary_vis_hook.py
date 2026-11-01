@@ -55,6 +55,10 @@ class PeriodicBatchVisualizationHook(Hook):
         if current_iter % self.interval != 0:
             return
 
+        # In multi-GPU DDP training, only rank 0 saves visualizations
+        if hasattr(runner, 'rank') and runner.rank != 0:
+            return
+
         # Ensure validation dataloader exists
         if not hasattr(runner, 'val_loop') or runner.val_loop is None:
             return
@@ -66,8 +70,9 @@ class PeriodicBatchVisualizationHook(Hook):
         was_training = model.training
         model.eval()
 
-        val_dataloader = runner.val_loop.dataloader
-        vis_count = 0
+        try:
+            val_dataloader = runner.val_loop.dataloader
+            vis_count = 0
 
         with torch.no_grad():
             for val_idx, val_batch in enumerate(val_dataloader):
@@ -235,6 +240,9 @@ class PeriodicBatchVisualizationHook(Hook):
                     plt.close(fig)
 
                     vis_count += 1
-
-        if was_training:
-            model.train()
+        except Exception as e:
+            if hasattr(runner, 'logger') and runner.logger is not None:
+                runner.logger.warning(f"PeriodicBatchVisualizationHook safely skipped iteration {current_iter}: {e}")
+        finally:
+            if was_training:
+                model.train()

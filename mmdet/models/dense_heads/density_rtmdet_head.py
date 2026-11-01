@@ -137,12 +137,16 @@ class DensityRTMDetSepBNHead(RTMDetSepBNHead):
                 centers = (scaled_boxes[:, 0:2] + scaled_boxes[:, 2:4]) / 2.0
 
                 for i in range(len(wh)):
-                    w, h = wh[i, 0].item(), wh[i, 1].item()
-                    cx, cy = centers[i, 0].item(), centers[i, 1].item()
+                    w, h = float(wh[i, 0].item()), float(wh[i, 1].item())
+                    cx, cy = float(centers[i, 0].item()), float(centers[i, 1].item())
                     if w <= 0 or h <= 0:
                         continue
+                    ctx_int = int(round(cx))
+                    cty_int = int(round(cy))
+                    if ctx_int < 0 or ctx_int >= W or cty_int < 0 or cty_int >= H:
+                        continue
                     r = max(gaussian_radius((math.ceil(h), math.ceil(w)), min_overlap=self.min_overlap), self.min_gaussian_radius)
-                    gen_gaussian_target(target_heatmaps[img_idx, 0], [cx, cy], int(r))
+                    gen_gaussian_target(target_heatmaps[img_idx, 0], [ctx_int, cty_int], int(r))
 
             # Compute Gaussian Focal Loss on density heatmap
             pred_density = logit.sigmoid()
@@ -158,17 +162,16 @@ class DensityRTMDetSepBNHead(RTMDetSepBNHead):
         self,
         cls_scores: List[Tensor],
         bbox_preds: List[Tensor],
-        dens_logits: List[Tensor] = None,
+        dens_logits: Optional[List[Tensor]] = None,
+        score_factors: Optional[List[Tensor]] = None,
         batch_img_metas: Optional[List[dict]] = None,
         cfg: Optional[ConfigType] = None,
         rescale: bool = False,
         with_nms: bool = True
     ) -> List[InstanceData]:
         # Modulate scores with density heatmap (sigmoid activated)
-        if self.use_density_at_test and dens_logits is not None:
+        if score_factors is None and self.use_density_at_test and dens_logits is not None:
             score_factors = [dens.sigmoid() for dens in dens_logits]
-        else:
-            score_factors = None
 
         return super().predict_by_feat(
             cls_scores,

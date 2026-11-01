@@ -28,9 +28,18 @@ except ImportError:
 import types
 pkg = types.ModuleType('mmdet.models.layers')
 pkg.__path__ = [layers_dir]
+utils_dir = os.path.join(repo_root, 'mmdet', 'models', 'utils')
+utils_pkg = types.ModuleType('mmdet.models.utils')
+utils_pkg.__path__ = [utils_dir]
 sys.modules['mmdet'] = types.ModuleType('mmdet')
 sys.modules['mmdet.models'] = types.ModuleType('mmdet.models')
 sys.modules['mmdet.models.layers'] = pkg
+sys.modules['mmdet.models.utils'] = utils_pkg
+
+spec_gt = importlib.util.spec_from_file_location("mmdet.models.utils.gaussian_target", os.path.join(utils_dir, "gaussian_target.py"))
+mod_gt = importlib.util.module_from_spec(spec_gt)
+sys.modules["mmdet.models.utils.gaussian_target"] = mod_gt
+spec_gt.loader.exec_module(mod_gt)
 
 def import_module_from_file(module_name, file_path):
     full_name = f"mmdet.models.layers.{module_name}"
@@ -174,6 +183,27 @@ def test_bg_vssblock():
     print(f"BG_VSSBlock forward output shape: {out.shape} -> PASSED")
 
 
+def test_gaussian_target_generation():
+    print("Testing Gaussian target generation with float coordinates and boundary edge-cases...")
+    from mmdet.models.utils.gaussian_target import gen_gaussian_target, gaussian_radius
+    heatmap = torch.zeros(1, 1, 64, 64)
+    # 1. Float coordinates & float radius
+    h, w = 12.7, 18.3
+    r = gaussian_radius((math.ceil(h), math.ceil(w)), min_overlap=0.3)
+    cx, cy = 31.4, 32.8
+    gen_gaussian_target(heatmap[0, 0], [cx, cy], r)
+    assert heatmap[0, 0, 33, 31].item() > 0.99, "Gaussian peak not at center"
+
+    # 2. Extreme edge case: point near or on border
+    gen_gaussian_target(heatmap[0, 0], [0.1, 0.2], r)
+    gen_gaussian_target(heatmap[0, 0], [63.9, 63.8], r)
+
+    # 3. Completely outside border (should not crash)
+    gen_gaussian_target(heatmap[0, 0], [-5.0, 70.0], r)
+
+    print("Gaussian Target Generation Unit Test -> PASSED")
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("Running UAVDet V1 Mathematical & Architectural Unit Tests")
@@ -184,6 +214,7 @@ if __name__ == '__main__':
     test_bg_ss2d_forward()
     test_bg_vssblock()
     test_exact_delta_decomposition_math()
+    test_gaussian_target_generation()
     print("=" * 60)
     print("ALL TESTS PASSED SUCCESSFULLY!")
     print("=" * 60)
