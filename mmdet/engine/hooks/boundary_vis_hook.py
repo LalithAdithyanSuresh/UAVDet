@@ -63,6 +63,13 @@ class PeriodicBatchVisualizationHook(Hook):
         if not hasattr(runner, 'val_loop') or runner.val_loop is None:
             return
 
+        try:
+            self._visualize(runner, current_iter)
+        except Exception as e:
+            if hasattr(runner, 'logger') and runner.logger is not None:
+                runner.logger.warning(f"PeriodicBatchVisualizationHook safely skipped iteration {current_iter}: {e}")
+
+    def _visualize(self, runner, current_iter: int) -> None:
         save_dir = osp.join(runner.work_dir, self.out_dir)
         os.makedirs(save_dir, exist_ok=True)
 
@@ -74,175 +81,172 @@ class PeriodicBatchVisualizationHook(Hook):
             val_dataloader = runner.val_loop.dataloader
             vis_count = 0
 
-        with torch.no_grad():
-            for val_idx, val_batch in enumerate(val_dataloader):
-                if vis_count >= self.num_samples:
-                    break
-
-                # Run model inference
-                if hasattr(model, 'module'):
-                    detector = model.module
-                else:
-                    detector = model
-
-                predictions = detector.val_step(val_batch)
-
-                # Retrieve inputs and ground-truth data
-                batch_inputs = val_batch['inputs']
-                batch_samples = val_batch['data_samples']
-
-                for b in range(len(batch_samples)):
+            with torch.no_grad():
+                for val_idx, val_batch in enumerate(val_dataloader):
                     if vis_count >= self.num_samples:
                         break
 
-                    data_sample = batch_samples[b]
-                    pred_sample = predictions[b]
-
-                    # 1. Recover RGB image
-                    img_path = data_sample.img_path if hasattr(data_sample, 'img_path') else f"img_{vis_count}"
-                    img_id = osp.splitext(osp.basename(img_path))[0]
-
-                    # De-normalize tensor or load original image
-                    if osp.exists(img_path):
-                        orig_bgr = cv2.imread(img_path)
-                        orig_rgb = cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB)
+                    # Run model inference
+                    if hasattr(model, 'module'):
+                        detector = model.module
                     else:
-                        img_tensor = batch_inputs[b].cpu().float()
-                        img_np = img_tensor.permute(1, 2, 0).numpy()
-                        img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
-                        orig_rgb = (img_np * 255).astype(np.uint8)
+                        detector = model
 
-                    h, w, _ = orig_rgb.shape
+                    predictions = detector.val_step(val_batch)
 
-                    # Ground truth bboxes
-                    gt_instances = data_sample.gt_instances
-                    gt_bboxes = gt_instances.bboxes.cpu().numpy() if len(gt_instances.bboxes) > 0 else np.zeros((0, 4))
-                    gt_labels = gt_instances.labels.cpu().numpy() if len(gt_instances.labels) > 0 else np.zeros((0,))
+                    # Retrieve inputs and ground-truth data
+                    batch_inputs = val_batch['inputs']
+                    batch_samples = val_batch['data_samples']
 
-                    # Predicted bboxes
-                    pred_instances = pred_sample.pred_instances
-                    pred_bboxes = pred_instances.bboxes.cpu().numpy() if len(pred_instances.bboxes) > 0 else np.zeros((0, 4))
-                    pred_scores = pred_instances.scores.cpu().numpy() if len(pred_instances.scores) > 0 else np.zeros((0,))
-                    pred_labels = pred_instances.labels.cpu().numpy() if len(pred_instances.labels) > 0 else np.zeros((0,))
+                    for b in range(len(batch_samples)):
+                        if vis_count >= self.num_samples:
+                            break
 
-                    # Filter predictions by score_thr
-                    keep = pred_scores >= self.score_thr
-                    filt_bboxes = pred_bboxes[keep]
-                    filt_scores = pred_scores[keep]
-                    filt_labels = pred_labels[keep]
+                        data_sample = batch_samples[b]
+                        pred_sample = predictions[b]
 
-                    mean_score = float(filt_scores.mean()) if len(filt_scores) > 0 else 0.0
+                        # 1. Recover RGB image
+                        img_path = data_sample.img_path if hasattr(data_sample, 'img_path') else f"img_{vis_count}"
+                        img_id = osp.splitext(osp.basename(img_path))[0]
 
-                    # -----------------------------------------------------------------
-                    # Panel 1: Ground Truth (GT)
-                    # -----------------------------------------------------------------
-                    p1_img = orig_rgb.copy()
-                    for box in gt_bboxes:
-                        x1, y1, x2, y2 = map(int, box)
-                        cv2.rectangle(p1_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        # De-normalize tensor or load original image
+                        if osp.exists(img_path):
+                            orig_bgr = cv2.imread(img_path)
+                            orig_rgb = cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB)
+                        else:
+                            img_tensor = batch_inputs[b].cpu().float()
+                            img_np = img_tensor.permute(1, 2, 0).numpy()
+                            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
+                            orig_rgb = (img_np * 255).astype(np.uint8)
 
-                    # -----------------------------------------------------------------
-                    # Panel 2: LoG Prior Map
-                    # -----------------------------------------------------------------
-                    if hasattr(detector, 'backbone') and hasattr(detector.backbone, 'last_log_prior') and detector.backbone.last_log_prior is not None:
-                        log_tensor = detector.backbone.last_log_prior[0, 0].cpu().numpy()
-                        log_norm = cv2.normalize(log_tensor, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                        log_color = cv2.applyColorMap(log_norm, cv2.COLORMAP_INFERNO)
-                        p2_img = cv2.resize(log_color, (w, h))
-                        p2_img = cv2.cvtColor(p2_img, cv2.COLOR_BGR2RGB)
-                    else:
-                        p2_img = np.zeros_like(orig_rgb)
+                        h, w, _ = orig_rgb.shape
 
-                    # -----------------------------------------------------------------
-                    # Panel 3: Predictions
-                    # -----------------------------------------------------------------
-                    p3_img = orig_rgb.copy()
-                    for box, score, lbl in zip(filt_bboxes, filt_scores, filt_labels):
-                        x1, y1, x2, y2 = map(int, box)
-                        cv2.rectangle(p3_img, (x1, y1), (x2, y2), (0, 165, 255), 2)
-                        cv2.putText(p3_img, f"{score:.2f}", (x1, max(y1 - 4, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
+                        # Ground truth bboxes
+                        gt_instances = data_sample.gt_instances
+                        gt_bboxes = gt_instances.bboxes.cpu().numpy() if len(gt_instances.bboxes) > 0 else np.zeros((0, 4))
+                        gt_labels = gt_instances.labels.cpu().numpy() if len(gt_instances.labels) > 0 else np.zeros((0,))
 
-                    # -----------------------------------------------------------------
-                    # Panel 4: IoU Error Map (Red: Missed, Yellow: Wrong/FP, Green: Correct)
-                    # -----------------------------------------------------------------
-                    p4_img = orig_rgb.copy()
-                    matched_gt = set()
-                    matched_pred = set()
+                        # Predicted bboxes
+                        pred_instances = pred_sample.pred_instances
+                        pred_bboxes = pred_instances.bboxes.cpu().numpy() if len(pred_instances.bboxes) > 0 else np.zeros((0, 4))
+                        pred_scores = pred_instances.scores.cpu().numpy() if len(pred_instances.scores) > 0 else np.zeros((0,))
+                        pred_labels = pred_instances.labels.cpu().numpy() if len(pred_instances.labels) > 0 else np.zeros((0,))
 
-                    if len(gt_bboxes) > 0 and len(filt_bboxes) > 0:
-                        ious = bbox_overlaps(torch.tensor(filt_bboxes), torch.tensor(gt_bboxes)).numpy()
-                        for p_idx in range(len(filt_bboxes)):
-                            best_gt_idx = np.argmax(ious[p_idx])
-                            max_iou = ious[p_idx, best_gt_idx]
-                            if max_iou >= self.iou_thr:
-                                if filt_labels[p_idx] == gt_labels[best_gt_idx]:
-                                    matched_pred.add(p_idx)
-                                    matched_gt.add(best_gt_idx)
+                        # Filter predictions by score_thr
+                        keep = pred_scores >= self.score_thr
+                        filt_bboxes = pred_bboxes[keep]
+                        filt_scores = pred_scores[keep]
+                        filt_labels = pred_labels[keep]
 
-                    # Draw Green: Correct Overlaps (True Positives)
-                    for p_idx in matched_pred:
-                        x1, y1, x2, y2 = map(int, filt_bboxes[p_idx])
-                        cv2.rectangle(p4_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        mean_score = float(filt_scores.mean()) if len(filt_scores) > 0 else 0.0
 
-                    # Draw Yellow: Wrongly classified or false positive predictions
-                    for p_idx in range(len(filt_bboxes)):
-                        if p_idx not in matched_pred:
+                        # -----------------------------------------------------------------
+                        # Panel 1: Ground Truth (GT)
+                        # -----------------------------------------------------------------
+                        p1_img = orig_rgb.copy()
+                        for box in gt_bboxes:
+                            x1, y1, x2, y2 = map(int, box)
+                            cv2.rectangle(p1_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                        # -----------------------------------------------------------------
+                        # Panel 2: LoG Prior Map
+                        # -----------------------------------------------------------------
+                        if hasattr(detector, 'backbone') and hasattr(detector.backbone, 'last_log_prior') and detector.backbone.last_log_prior is not None:
+                            log_tensor = detector.backbone.last_log_prior[0, 0].cpu().numpy()
+                            log_norm = cv2.normalize(log_tensor, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                            log_color = cv2.applyColorMap(log_norm, cv2.COLORMAP_INFERNO)
+                            p2_img = cv2.resize(log_color, (w, h))
+                            p2_img = cv2.cvtColor(p2_img, cv2.COLOR_BGR2RGB)
+                        else:
+                            p2_img = np.zeros_like(orig_rgb)
+
+                        # -----------------------------------------------------------------
+                        # Panel 3: Predictions
+                        # -----------------------------------------------------------------
+                        p3_img = orig_rgb.copy()
+                        for box, score, lbl in zip(filt_bboxes, filt_scores, filt_labels):
+                            x1, y1, x2, y2 = map(int, box)
+                            cv2.rectangle(p3_img, (x1, y1), (x2, y2), (0, 165, 255), 2)
+                            cv2.putText(p3_img, f"{score:.2f}", (x1, max(y1 - 4, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
+
+                        # -----------------------------------------------------------------
+                        # Panel 4: IoU Error Map (Red: Missed, Yellow: Wrong/FP, Green: Correct)
+                        # -----------------------------------------------------------------
+                        p4_img = orig_rgb.copy()
+                        matched_gt = set()
+                        matched_pred = set()
+
+                        if len(gt_bboxes) > 0 and len(filt_bboxes) > 0:
+                            ious = bbox_overlaps(torch.tensor(filt_bboxes), torch.tensor(gt_bboxes)).numpy()
+                            for p_idx in range(len(filt_bboxes)):
+                                best_gt_idx = np.argmax(ious[p_idx])
+                                max_iou = ious[p_idx, best_gt_idx]
+                                if max_iou >= self.iou_thr:
+                                    if filt_labels[p_idx] == gt_labels[best_gt_idx]:
+                                        matched_pred.add(p_idx)
+                                        matched_gt.add(best_gt_idx)
+
+                        # Draw Green: Correct Overlaps (True Positives)
+                        for p_idx in matched_pred:
                             x1, y1, x2, y2 = map(int, filt_bboxes[p_idx])
-                            cv2.rectangle(p4_img, (x1, y1), (x2, y2), (255, 255, 0), 2)
+                            cv2.rectangle(p4_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    # Draw Red: Missed ground truth targets (False Negatives)
-                    for g_idx in range(len(gt_bboxes)):
-                        if g_idx not in matched_gt:
-                            x1, y1, x2, y2 = map(int, gt_bboxes[g_idx])
-                            cv2.rectangle(p4_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                        # Draw Yellow: Wrongly classified or false positive predictions
+                        for p_idx in range(len(filt_bboxes)):
+                            if p_idx not in matched_pred:
+                                x1, y1, x2, y2 = map(int, filt_bboxes[p_idx])
+                                cv2.rectangle(p4_img, (x1, y1), (x2, y2), (255, 255, 0), 2)
 
-                    # -----------------------------------------------------------------
-                    # Panel 5: Mamba Adaptive Path Taken Route
-                    # -----------------------------------------------------------------
-                    p5_img = orig_rgb.copy()
-                    if hasattr(detector, 'backbone') and hasattr(detector.backbone, 'last_boundary_strengths') and len(detector.backbone.last_boundary_strengths) > 0:
-                        # Use stage 2 boundary flush strength
-                        s_map = detector.backbone.last_boundary_strengths[0][0, 0].cpu().numpy()
-                        s_norm = cv2.normalize(s_map, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                        s_color = cv2.applyColorMap(s_norm, cv2.COLORMAP_VIRIDIS)
-                        s_color_resized = cv2.resize(s_color, (w, h))
-                        p5_img = cv2.addWeighted(orig_rgb, 0.45, cv2.cvtColor(s_color_resized, cv2.COLOR_BGR2RGB), 0.55, 0)
+                        # Draw Red: Missed ground truth targets (False Negatives)
+                        for g_idx in range(len(gt_bboxes)):
+                            if g_idx not in matched_gt:
+                                x1, y1, x2, y2 = map(int, gt_bboxes[g_idx])
+                                cv2.rectangle(p4_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-                    # Overlay 2D scan routes (horizontal + vertical bidirectional grid lines)
-                    step_y, step_x = max(h // 8, 16), max(w // 8, 16)
-                    for y in range(step_y, h, step_y):
-                        cv2.line(p5_img, (0, y), (w, y), (0, 255, 255), 1, cv2.LINE_AA)
-                    for x in range(step_x, w, step_x):
-                        cv2.line(p5_img, (x, 0), (x, h), (255, 0, 255), 1, cv2.LINE_AA)
+                        # -----------------------------------------------------------------
+                        # Panel 5: Mamba Adaptive Path Taken Route
+                        # -----------------------------------------------------------------
+                        p5_img = orig_rgb.copy()
+                        if hasattr(detector, 'backbone') and hasattr(detector.backbone, 'last_boundary_strengths') and len(detector.backbone.last_boundary_strengths) > 0:
+                            # Use stage 2 boundary flush strength
+                            s_map = detector.backbone.last_boundary_strengths[0][0, 0].cpu().numpy()
+                            s_norm = cv2.normalize(s_map, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                            s_color = cv2.applyColorMap(s_norm, cv2.COLORMAP_VIRIDIS)
+                            s_color_resized = cv2.resize(s_color, (w, h))
+                            p5_img = cv2.addWeighted(orig_rgb, 0.45, cv2.cvtColor(s_color_resized, cv2.COLOR_BGR2RGB), 0.55, 0)
 
-                    # -----------------------------------------------------------------
-                    # Combine into 5-panel figure
-                    # -----------------------------------------------------------------
-                    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
-                    panels = [
-                        (p1_img, f"Ground Truth ({len(gt_bboxes)} objs)"),
-                        (p2_img, "LoG Structural Prior"),
-                        (p3_img, f"Predictions ({len(filt_bboxes)} bboxes)"),
-                        (p4_img, "IoU Error Map (Green:TP, Yellow:FP, Red:FN)"),
-                        (p5_img, "Mamba Adaptive Path Route")
-                    ]
+                        # Overlay 2D scan routes (horizontal + vertical bidirectional grid lines)
+                        step_y, step_x = max(h // 8, 16), max(w // 8, 16)
+                        for y in range(step_y, h, step_y):
+                            cv2.line(p5_img, (0, y), (w, y), (0, 255, 255), 1, cv2.LINE_AA)
+                        for x in range(step_x, w, step_x):
+                            cv2.line(p5_img, (x, 0), (x, h), (255, 0, 255), 1, cv2.LINE_AA)
 
-                    for ax, (panel_img, title) in zip(axes, panels):
-                        ax.imshow(panel_img)
-                        ax.set_title(title, fontsize=12, fontweight='bold')
-                        ax.axis('off')
+                        # -----------------------------------------------------------------
+                        # Combine into 5-panel figure
+                        # -----------------------------------------------------------------
+                        fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+                        panels = [
+                            (p1_img, f"Ground Truth ({len(gt_bboxes)} objs)"),
+                            (p2_img, "LoG Structural Prior"),
+                            (p3_img, f"Predictions ({len(filt_bboxes)} bboxes)"),
+                            (p4_img, "IoU Error Map (Green:TP, Yellow:FP, Red:FN)"),
+                            (p5_img, "Mamba Adaptive Path Route")
+                        ]
 
-                    plt.tight_layout()
+                        for ax, (panel_img, title) in zip(axes, panels):
+                            ax.imshow(panel_img)
+                            ax.set_title(title, fontsize=12, fontweight='bold')
+                            ax.axis('off')
 
-                    filename = f"{img_id}_iter{current_iter}_epoch{runner.epoch}_score{mean_score:.2f}.png"
-                    out_path = osp.join(save_dir, filename)
-                    plt.savefig(out_path, dpi=120, bbox_inches='tight')
-                    plt.close(fig)
+                        plt.tight_layout()
 
-                    vis_count += 1
-        except Exception as e:
-            if hasattr(runner, 'logger') and runner.logger is not None:
-                runner.logger.warning(f"PeriodicBatchVisualizationHook safely skipped iteration {current_iter}: {e}")
+                        filename = f"{img_id}_iter{current_iter}_epoch{runner.epoch}_score{mean_score:.2f}.png"
+                        out_path = osp.join(save_dir, filename)
+                        plt.savefig(out_path, dpi=120, bbox_inches='tight')
+                        plt.close(fig)
+
+                        vis_count += 1
         finally:
             if was_training:
                 model.train()
