@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab and alex-yimingyang/UAVDet contributors.
+import math
 from typing import List, Optional, Tuple, Union
 
 import torch
