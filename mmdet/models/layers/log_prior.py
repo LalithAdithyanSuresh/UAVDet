@@ -266,6 +266,9 @@ class BoundaryHead(nn.Module):
         feat_edges = self.feat_log(feat)
         cat_in = torch.cat([feat_edges, log_pooled], dim=1)
         raw_s = self.net(cat_in)
-        s = F.softplus(raw_s)
+        # Direct structural LoG prior residual ensures boundary gating is spatially aligned from Iter 1
+        prior_mean = log_pooled.mean(dim=1, keepdim=True)
+        prior_excess = F.relu(prior_mean - prior_mean.mean(dim=(-2, -1), keepdim=True))
+        s = F.softplus(raw_s) + 0.05 * prior_excess
         s = torch.clamp(s, min=0.0, max=self.max_strength)
         return s
