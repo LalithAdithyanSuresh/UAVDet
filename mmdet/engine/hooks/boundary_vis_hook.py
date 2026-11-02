@@ -5,9 +5,6 @@ import time
 from typing import Optional, Sequence
 
 import cv2
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -64,11 +61,10 @@ def _draw_mamba_adaptive_route(base_rgb: np.ndarray, s_u8: np.ndarray) -> np.nda
     heat_rgb = cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB)
     canvas = cv2.addWeighted(base_rgb, 0.38, heat_rgb, 0.62, 0)
 
-    line_thick = max(2, int(round(max(h, w) / 420.0)))
-    node_radius = max(4, line_thick * 2)
-    tip_len = 0.22
+    line_thick = max(2, int(round(max(h, w) / 380.0)))
+    node_radius = max(5, line_thick * 2 + 1)
+    tip_len = 0.24
 
-    # Serpentine horizontal scan rows + vertical scan columns
     num_rows = 9
     num_cols = 12
     ys = np.linspace(int(h * 0.07), int(h * 0.93), num_rows).astype(int)
@@ -79,29 +75,25 @@ def _draw_mamba_adaptive_route(base_rgb: np.ndarray, s_u8: np.ndarray) -> np.nda
         for c_idx in range(len(row_xs) - 1):
             x0, x1 = int(row_xs[c_idx]), int(row_xs[c_idx + 1])
             xm = (x0 + x1) // 2
-            # Sample local boundary strength s in [0, 255] around segment
             y_lo, y_hi = max(0, y - 6), min(h, y + 7)
             x_lo, x_hi = max(0, min(x0, x1)), min(w, max(x0, x1) + 1)
             local_s = float(s_u8[y_lo:y_hi, x_lo:x_hi].max()) / 255.0
 
             if local_s >= 0.55:
-                # High boundary strength -> Mamba flushes hidden state (Bright Yellow/Red arrow + reset node)
-                color = (255, 230, 0)
+                # High boundary strength -> Mamba flushes hidden state (Bright Yellow arrow + Red/White reset node)
                 cv2.arrowedLine(
-                    canvas, (x0, y), (x1, y), color,
+                    canvas, (x0, y), (x1, y), (255, 230, 0),
                     thickness=line_thick + 1, line_type=cv2.LINE_AA, tipLength=tip_len
                 )
-                cv2.circle(canvas, (xm, y), node_radius, (255, 40, 90), -1, lineType=cv2.LINE_AA)
+                cv2.circle(canvas, (xm, y), node_radius, (255, 35, 85), -1, lineType=cv2.LINE_AA)
                 cv2.circle(canvas, (xm, y), node_radius + 1, (255, 255, 255), 1, lineType=cv2.LINE_AA)
             else:
                 # Smooth context propagation (g -> 1.0, Bright Cyan arrow)
-                color = (0, 255, 255)
                 cv2.arrowedLine(
-                    canvas, (x0, y), (x1, y), color,
+                    canvas, (x0, y), (x1, y), (0, 255, 255),
                     thickness=line_thick, line_type=cv2.LINE_AA, tipLength=tip_len
                 )
 
-        # Draw vertical turn connector to the next scan row
         if r_idx < len(ys) - 1:
             x_turn = int(row_xs[-1])
             y_next = int(ys[r_idx + 1])
@@ -111,6 +103,34 @@ def _draw_mamba_adaptive_route(base_rgb: np.ndarray, s_u8: np.ndarray) -> np.nda
             )
 
     return canvas
+
+
+def _compose_5panel_cv2(panels, out_path: str, panel_w: int = 640) -> None:
+    """Fast OpenCV 5-panel horizontal compositor (~30x faster than matplotlib savefig)."""
+    first_img = panels[0][0]
+    h, w = first_img.shape[:2]
+    scale = float(panel_w) / float(max(w, 1))
+    panel_h = max(240, int(round(h * scale)))
+    header_h = 44
+    pad_w = 8
+
+    rendered_cols = []
+    for idx, (rgb_img, title) in enumerate(panels):
+        resized_rgb = cv2.resize(rgb_img, (panel_w, panel_h), interpolation=cv2.INTER_AREA)
+        bgr_img = cv2.cvtColor(resized_rgb, cv2.COLOR_RGB2BGR)
+        header = np.full((header_h, panel_w, 3), 24, dtype=np.uint8)
+        cv2.putText(
+            header, title, (12, 29),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.58, (245, 245, 245), 1, cv2.LINE_AA
+        )
+        col = np.vstack([header, bgr_img])
+        rendered_cols.append(col)
+        if idx < len(panels) - 1:
+            sep = np.full((header_h + panel_h, pad_w, 3), 255, dtype=np.uint8)
+            rendered_cols.append(sep)
+
+    composite = np.hstack(rendered_cols)
+    cv2.imwrite(out_path, composite)
 
 
 @HOOKS.register_module()
@@ -160,6 +180,11 @@ class PeriodicBatchVisualizationHook(Hook):
         except Exception as e:
             if hasattr(runner, 'logger') and runner.logger is not None:
                 runner.logger.warning(f"PeriodicBatchVisualizationHook safely skipped iteration {current_iter}: {e}")
+        finally:
+            # Reset IterTimerHook timer so validation time is not counted as next iteration's data_time
+            for h in getattr(runner, '_hooks', []):
+                if h.__class__.__name__ == 'IterTimerHook' and hasattr(h, 'time'):
+                    h.time = time.time()
 
     def _visualize(self, runner, current_iter: int) -> None:
         t0 = time.time()
@@ -183,6 +208,7 @@ class PeriodicBatchVisualizationHook(Hook):
         log_mean_vals = []
         log_max_vals = []
         gate_s_means = []
+        gate_s_maxs = []
         dens_means = []
         dens_maxs = []
 
@@ -210,6 +236,7 @@ class PeriodicBatchVisualizationHook(Hook):
                         s_list = getattr(detector.backbone, 'last_boundary_strengths', None)
                         if s_list:
                             gate_s_means.append(float(s_list[0].float().mean().item()))
+                            gate_s_maxs.append(float(s_list[0].float().max().item()))
                     if hasattr(detector, 'bbox_head'):
                         d_list = getattr(detector.bbox_head, 'last_density_maps', None)
                         if d_list:
@@ -253,7 +280,6 @@ class PeriodicBatchVisualizationHook(Hook):
                                 gt_bboxes[:, [0, 2]] /= float(sf[0])
                                 gt_bboxes[:, [1, 3]] /= float(sf[1])
 
-                        # Predicted bboxes (already rescaled to original image space by val_step)
                         pred_instances = pred_sample.pred_instances
                         pred_bboxes = pred_instances.bboxes.cpu().numpy() if len(pred_instances.bboxes) > 0 else np.zeros((0, 4))
                         pred_scores = pred_instances.scores.cpu().numpy() if len(pred_instances.scores) > 0 else np.zeros((0,))
@@ -270,7 +296,6 @@ class PeriodicBatchVisualizationHook(Hook):
                         total_pred_thr += int(keep_thr.sum())
                         total_pred_low += int(keep_low.sum())
 
-                        # Always display top-25 predictions during early warmup if 0 boxes exceed score_thr
                         if int(keep_thr.sum()) > 0:
                             filt_bboxes = pred_bboxes[keep_thr]
                             filt_scores = pred_scores[keep_thr]
@@ -285,17 +310,13 @@ class PeriodicBatchVisualizationHook(Hook):
 
                         mean_score = float(filt_scores.mean()) if len(filt_scores) > 0 else 0.0
 
-                        # -----------------------------------------------------------------
                         # Panel 1: Ground Truth (GT)
-                        # -----------------------------------------------------------------
                         p1_img = orig_rgb.copy()
                         for box in gt_bboxes:
                             x1, y1, x2, y2 = map(int, box)
                             cv2.rectangle(p1_img, (x1, y1), (x2, y2), (0, 255, 0), box_thick)
 
-                        # -----------------------------------------------------------------
-                        # Panel 2: LoG Prior Map (cropped to unpadded aspect ratio + contrast stretched)
-                        # -----------------------------------------------------------------
+                        # Panel 2: LoG Prior Map
                         if hasattr(detector, 'backbone') and getattr(detector.backbone, 'last_log_prior', None) is not None:
                             log_batch = detector.backbone.last_log_prior
                             b_idx = min(b, log_batch.shape[0] - 1)
@@ -307,9 +328,7 @@ class PeriodicBatchVisualizationHook(Hook):
                             log_u8 = np.zeros((h, w), dtype=np.uint8)
                             p2_img = np.zeros_like(orig_rgb)
 
-                        # -----------------------------------------------------------------
                         # Panel 3: Predictions
-                        # -----------------------------------------------------------------
                         p3_img = orig_rgb.copy()
                         for box, score, lbl in zip(filt_bboxes, filt_scores, filt_labels):
                             x1, y1, x2, y2 = map(int, box)
@@ -320,9 +339,7 @@ class PeriodicBatchVisualizationHook(Hook):
                                 cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 200, 0), max(1, box_thick - 1), cv2.LINE_AA
                             )
 
-                        # -----------------------------------------------------------------
-                        # Panel 4: IoU Error Map (Red: Missed, Yellow: Wrong/FP, Green: Correct)
-                        # -----------------------------------------------------------------
+                        # Panel 4: IoU Error Map
                         p4_img = orig_rgb.copy()
                         matched_gt = set()
                         matched_pred = set()
@@ -358,24 +375,17 @@ class PeriodicBatchVisualizationHook(Hook):
                             x1, y1, x2, y2 = map(int, filt_bboxes[p_idx])
                             cv2.rectangle(p4_img, (x1, y1), (x2, y2), (0, 255, 0), box_thick + 1)
 
-                        # -----------------------------------------------------------------
-                        # Panel 5: Mamba Adaptive Path Taken Route (for sample b)
-                        # -----------------------------------------------------------------
+                        # Panel 5: Mamba Adaptive Path Taken Route
                         if hasattr(detector, 'backbone') and getattr(detector.backbone, 'last_boundary_strengths', None):
                             s_batch = detector.backbone.last_boundary_strengths[0]
                             b_idx = min(b, s_batch.shape[0] - 1)
                             s_map = s_batch[b_idx, 0].cpu().numpy()
                             s_u8 = _crop_and_normalize_map(s_map, h, w, input_size=640, p_low=10.0, p_high=99.0)
-                            # Fuse with LoG structural edges so boundary resets are sharp even at iter 1
                             s_u8 = np.maximum(s_u8, (log_u8.astype(np.float32) * 0.85).astype(np.uint8))
                             p5_img = _draw_mamba_adaptive_route(orig_rgb, s_u8)
                         else:
                             p5_img = _draw_mamba_adaptive_route(orig_rgb, log_u8)
 
-                        # -----------------------------------------------------------------
-                        # Combine into 5-panel figure
-                        # -----------------------------------------------------------------
-                        fig, axes = plt.subplots(1, 5, figsize=(26, 5.2))
                         pred_title = (
                             f"Predictions ({len(filt_bboxes)} >= {self.score_thr:.2f})"
                             if not used_fallback
@@ -387,21 +397,13 @@ class PeriodicBatchVisualizationHook(Hook):
                             (p1_img, f"Ground Truth ({len(gt_bboxes)} objs)"),
                             (p2_img, "LoG Structural Prior"),
                             (p3_img, pred_title),
-                            (p4_img, "IoU Error Map (Green:TP, Yellow:FP, Red:FN)"),
-                            (p5_img, "Mamba Adaptive Path (Cyan:Flow, Red/Yel:Reset)")
+                            (p4_img, "IoU Error Map (G:TP, Y:FP, R:FN)"),
+                            (p5_img, "Mamba Adaptive Route (Cyan:Flow, Red:Reset)")
                         ]
-
-                        for ax, (panel_img, title) in zip(axes, panels):
-                            ax.imshow(panel_img)
-                            ax.set_title(title, fontsize=11, fontweight='bold')
-                            ax.axis('off')
-
-                        plt.tight_layout()
 
                         filename = f"{img_id}_iter{current_iter}_epoch{runner.epoch + 1}_score{mean_score:.3f}.png"
                         out_path = osp.join(save_dir, filename)
-                        plt.savefig(out_path, dpi=140, bbox_inches='tight')
-                        plt.close(fig)
+                        _compose_5panel_cv2(panels, out_path, panel_w=640)
 
                         vis_count += 1
 
@@ -414,6 +416,7 @@ class PeriodicBatchVisualizationHook(Hook):
             log_m = float(np.mean(log_mean_vals)) if log_mean_vals else 0.0
             log_x = float(np.max(log_max_vals)) if log_max_vals else 0.0
             s_m = float(np.mean(gate_s_means)) if gate_s_means else 0.0
+            s_x = float(np.max(gate_s_maxs)) if gate_s_maxs else 0.0
             g_m = float(np.exp(-s_m))
             d_m = float(np.mean(dens_means)) if dens_means else 0.0
             d_x = float(np.max(dens_maxs)) if dens_maxs else 0.0
@@ -428,7 +431,8 @@ class PeriodicBatchVisualizationHook(Hook):
                 f"  Val Metrics: TP={total_tp}, FP={total_fp}, FN={total_fn} | "
                 f"Precision={precision:.1f}%, Recall={recall:.1f}%, MeanIoU={mean_iou:.3f}\n"
                 f"  V1 Modules : LoG(mean={log_m:.3f}, max={log_x:.3f}) | "
-                f"BoundaryGate(s={s_m:.4f}, g={g_m:.4f}) | Density(mean={d_m:.3f}, max={d_x:.3f})\n"
+                f"BoundaryGate(s_mean={s_m:.4f}, s_max={s_x:.4f}, g={g_m:.4f}) | "
+                f"Density(mean={d_m:.3f}, max={d_x:.3f})\n"
                 f"  Saved PNGs : {save_dir}/*_iter{current_iter}_*.png\n"
                 f"{'='*78}"
             )

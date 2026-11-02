@@ -167,12 +167,16 @@ class LoGPrior(nn.Module):
 
     def init_weights(self) -> None:
         with torch.no_grad():
-            nn.init.kaiming_normal_(self.out_conv[0].weight, mode='fan_out', nonlinearity='relu')
+            # Initialize 3x3 depthwise conv as a positive Gaussian smoothing kernel [1,2,1]^T [1,2,1] / 16
+            k1d = torch.tensor([0.25, 0.5, 0.25], dtype=torch.float32)
+            k2d = torch.outer(k1d, k1d).view(1, 1, 3, 3)
+            self.out_conv[0].weight.copy_(k2d.repeat(self.out_conv[0].weight.shape[0], 1, 1, 1))
             nn.init.ones_(self.out_conv[1].weight)
             nn.init.zeros_(self.out_conv[1].bias)
-            # Initialize 1x1 projection with positive weights so strong LoG edges map to > 0.5
-            nn.init.constant_(self.out_conv[3].weight, 1.0 / (3.0 * len(self.sigmas)))
-            nn.init.constant_(self.out_conv[3].bias, 0.0)
+            # Initialize 1x1 projection with positive weights and negative bias so flat=0.12 and edges=0.85..0.99
+            in_feat = 3.0 * len(self.sigmas)
+            nn.init.constant_(self.out_conv[3].weight, 3.0 / in_feat)
+            nn.init.constant_(self.out_conv[3].bias, -2.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -209,7 +213,10 @@ class LoGPrior(nn.Module):
             responses.append(resp)
 
         all_resp = torch.cat(responses, dim=1)  # (B, 3 * num_sigmas, H, W)
-        prior_map = self.out_conv(all_resp)     # (B, out_channels, H, W) in [0, 1]
+        # Per-image spatial RMS normalization ensures scale-invariant [0, ~6] edge responses in both train and eval modes
+        rms = all_resp.float().pow(2).mean(dim=(-2, -1), keepdim=True).add(1e-8).sqrt().to(all_resp.dtype)
+        all_resp_norm = (all_resp / rms).clamp(max=8.0)
+        prior_map = self.out_conv(all_resp_norm)  # (B, out_channels, H, W) in [0, 1]
         return prior_map
 
 

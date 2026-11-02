@@ -158,12 +158,30 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=1),
     param_scheduler=dict(type='ParamSchedulerHook'),
-    checkpoint=dict(type='CheckpointHook', interval=10, max_keep_ckpts=3, save_best='auto'),
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3, save_best='auto', save_last=True),
     sampler_seed=dict(type='DistSamplerSeedHook'),
     visualization=dict(type='DetVisualizationHook')
 )
 
 log_processor = dict(type='LogProcessor', window_size=1, by_epoch=True)
+
+# Training & Validation Loops (Run full validation & save checkpoint every single epoch)
+train_cfg = dict(
+    type='EpochBasedTrainLoop',
+    max_epochs=200,
+    val_interval=1,
+    dynamic_intervals=[(180, 1)])
+val_cfg = dict(type='ValLoop')
+test_cfg = dict(type='TestLoop')
+
+# Visualizer & Logging Backends (Local scalars + TensorBoard)
+visualizer = dict(
+    type='DetLocalVisualizer',
+    vis_backends=[
+        dict(type='LocalVisBackend'),
+        dict(type='TensorboardVisBackend')
+    ],
+    name='visualizer')
 
 # DDP configuration (all parameters participate in forward/backward; False avoids redundant graph traversal)
 find_unused_parameters = False

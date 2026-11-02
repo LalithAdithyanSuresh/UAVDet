@@ -441,6 +441,20 @@ def main():
 
             runner.train()
             break
+        except KeyboardInterrupt:
+            print("\n[UAVDet] Training interrupted by user (Ctrl+C). Saving emergency checkpoint...", flush=True)
+            try:
+                save_filename = f"emergency_iter_{getattr(runner, 'iter', 0)}_epoch_{getattr(runner, 'epoch', 0) + 1}.pth"
+                runner.save_checkpoint(
+                    runner.work_dir,
+                    filename=save_filename,
+                    save_optimizer=True,
+                    save_param_scheduler=True
+                )
+                print(f"[UAVDet] Emergency checkpoint saved to {runner.work_dir}/{save_filename}!", flush=True)
+            except Exception as e:
+                print(f"[UAVDet] Notice: Could not save emergency checkpoint ({e})", flush=True)
+            sys.exit(0)
         except RuntimeError as e:
             if 'out of memory' not in str(e).lower():
                 raise
