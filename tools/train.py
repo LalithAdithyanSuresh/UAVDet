@@ -3,6 +3,7 @@ import argparse
 import copy
 import gc
 import importlib.machinery
+import logging
 import math
 import os
 import os.path as osp
@@ -12,9 +13,48 @@ import time
 import types
 import warnings
 
+# Suppress third-party FutureWarnings / UserWarnings (timm, mmengine, torch)
+os.environ['PYTHONWARNINGS'] = 'ignore'
+warnings.filterwarnings('ignore')
+
 # Ensure dynamic CUDA memory segments to prevent allocator fragmentation
 if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+
+def _install_clean_log_filter():
+    """Suppresses noisy mmengine startup dumps (500-line config dump, 400-line
+    paramwise_options dump, hook priority table, and deprecation notices) while
+    preserving all training iteration logs, validation outputs, and errors."""
+    _suppressed_substrings = (
+        'paramwise_options -- ',
+        'is duplicate. It is skipped since bypass_duplicate=True',
+        'Hooks will be executed in the following order:',
+        'train_dataloader = dict(',
+        'val_dataloader = dict(',
+        'test_dataloader = dict(',
+        'System environment:',
+        '"FileClient" will be deprecated',
+        '"HardDiskBackend" is the alias',
+        'Gradient accumulative may slightly decrease performance',
+        'Distributed training:',
+    )
+    orig_handle = logging.Handler.handle
+
+    def _filtered_handle(self, record):
+        try:
+            msg = record.getMessage()
+            for substr in _suppressed_substrings:
+                if substr in msg:
+                    return False
+        except Exception:
+            pass
+        return orig_handle(self, record)
+
+    logging.Handler.handle = _filtered_handle
+
+
+_install_clean_log_filter()
 
 # Ensure fallback for mmcv._ext if compiled C++ ops are not present
 try:
@@ -178,11 +218,9 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
 
     if local_rank == 0:
         print(
-            f'\n[AutoBatchProbe] Probing safe batch size on GPU {device_idx} '
-            f'(Free VRAM: {min_free_bytes / (1024**3):.2f} GiB / '
-            f'{min_total_bytes / (1024**3):.2f} GiB, '
-            f'Safety ceiling: {vram_budget_bytes / (1024**3):.2f} GiB, '
-            f'Candidates: {candidates})...'
+            f'[AutoBatchProbe] GPU {device_idx} Free VRAM: {min_free_bytes / (1024**3):.2f} / '
+            f'{min_total_bytes / (1024**3):.2f} GiB (Budget: {vram_budget_bytes / (1024**3):.2f} GiB) '
+            f'| Testing candidates: {candidates}'
         )
 
     register_all_modules(init_default_scope=True)
@@ -233,9 +271,8 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
                 peak_bytes = torch.cuda.max_memory_allocated(device)
                 if local_rank == 0:
                     print(
-                        f'  [AutoBatchProbe] Tested batch_size={bs}: '
-                        f'peak VRAM = {peak_bytes / (1024**3):.2f} GiB '
-                        f'(budget = {vram_budget_bytes / (1024**3):.2f} GiB)'
+                        f'  [AutoBatchProbe] batch_size={bs} -> '
+                        f'peak VRAM = {peak_bytes / (1024**3):.2f} GiB'
                     )
 
                 del x, feats, outs, loss
@@ -245,9 +282,6 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
                 if peak_bytes <= vram_budget_bytes:
                     selected_bs = bs
                     break
-                else:
-                    if local_rank == 0:
-                        print(f'  [AutoBatchProbe] batch_size={bs} exceeded safety budget; trying next smaller batch size...')
             except RuntimeError as e:
                 del x, feats, outs, loss
                 if backbone is not None:
@@ -260,16 +294,12 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
                 torch.cuda.empty_cache()
                 if 'out of memory' in str(e).lower():
                     if local_rank == 0:
-                        print(f'  [AutoBatchProbe] batch_size={bs} triggered CUDA OOM during probe; trying smaller batch size...')
+                        print(f'  [AutoBatchProbe] batch_size={bs} -> OOM; trying smaller batch size...')
                     continue
                 else:
-                    if local_rank == 0:
-                        print(f'  [AutoBatchProbe] Notice during probe ({e}); falling back to configured batch_size={configured_bs}')
                     selected_bs = configured_bs
                     break
-    except Exception as e:
-        if local_rank == 0:
-            print(f'[AutoBatchProbe] Probe setup notice ({e}); keeping batch_size={configured_bs}')
+    except Exception:
         selected_bs = configured_bs
     finally:
         del backbone, neck, bbox_head
@@ -310,9 +340,9 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
 
     if local_rank == 0:
         print(
-            f'[AutoBatchProbe] Selected batch_size={selected_bs} per GPU '
-            f'x {world_size} GPUs x accumulative_counts={new_accum} '
-            f'= {selected_bs * world_size * new_accum} effective batch size.\n'
+            f'[AutoBatchProbe] Selected batch_size={selected_bs}/GPU '
+            f'x {world_size} GPUs x accum={new_accum} '
+            f'(effective batch={selected_bs * world_size * new_accum})\n'
         )
     return cfg
 
@@ -332,10 +362,8 @@ def main():
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
-        # update configs according to CLI args if args.work_dir is not None
         cfg.work_dir = args.work_dir
     elif cfg.get('work_dir', None) is None:
-        # use config filename as default work_dir if cfg.work_dir is None
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
 
@@ -405,8 +433,6 @@ def main():
 
             new_bs = max(1, current_bs // 2)
             new_accum = current_accum * 2
-            # If running under multi-GPU torchrun, exit with code 88 so setup_uavdet_server.py
-            # can cleanly respawn all DDP workers with the reduced batch size.
             if args.launcher != 'none' or int(os.environ.get('WORLD_SIZE', 1)) > 1:
                 print(
                     f'[UAVDET_OOM_RETRY] Recommending respawn with '

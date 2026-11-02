@@ -6,7 +6,10 @@ from typing import Callable, Any
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from timm.models.layers import DropPath
+try:
+    from timm.layers import DropPath
+except ImportError:
+    from timm.models.layers import DropPath
 
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 try:
