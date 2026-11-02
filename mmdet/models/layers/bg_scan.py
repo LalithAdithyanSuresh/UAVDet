@@ -8,8 +8,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import repeat
 
-from .common_utils_mbyolo import LayerNorm2d, CrossScan, CrossMerge, SelectiveScanCore, pytorch_selective_scan_ref
-from .mamba_yolo import SS2D, VSSBlock
+from .common_utils_mbyolo import (
+    LayerNorm2d,
+    CrossScan,
+    CrossMerge,
+    SelectiveScanCore,
+    pytorch_selective_scan_ref,
+    DropPath,
+)
+from .mamba_yolo import SS2D, LSBlock, RGBlock
 
 # Check whether compiled CUDA selective_scan is available
 try:
@@ -33,7 +40,7 @@ def boundary_gated_cross_selective_scan(
     ssoflex: bool = True,
     SelectiveScan=SelectiveScanCore,
 ) -> torch.Tensor:
-    """Exact Boundary-Gated 2D Cross-Selective Scan.
+    """Exact Boundary-Gated 2D Cross-Selective Scan (V1 Fix 3).
 
     Implements the target recurrence:
         h_t = g_t \odot (\overline{A}_t h_{t-1}) + \overline{B}_t x_t
@@ -47,7 +54,7 @@ def boundary_gated_cross_selective_scan(
         exp(\Delta'_t A_n) = exp(s_t A_n) * exp(\Delta_t A_n) = g_{t,n} * \overline{A}_t
         \Delta'_t B_t u'_t = \Delta'_t B_t (u_t * \Delta_t / \Delta'_t) = \Delta_t B_t u_t = \overline{B}_t x_t
 
-    This reproduces the exact boundary gating without requiring custom CUDA kernel compilation.
+    Reproduces exact boundary gating with both the compiled CUDA kernel and the parallel associative scan.
     """
     B, D, H, W = x.shape
     D_inner, N = A_logs.shape
@@ -74,7 +81,7 @@ def boundary_gated_cross_selective_scan(
     # Input scaling compensation: u' = u * (\Delta / \Delta')
     u_prime = xs * (delta / (delta_prime + 1e-8))
 
-    # Reshape for selective scan: flatten K and D into first dimension
+    # Reshape for selective scan: flatten K and D into channel dimension
     xs_flat = xs.reshape(B, -1, L)
     u_prime_flat = u_prime.reshape(B, -1, L)
     delta_prime_flat = delta_prime.reshape(B, -1, L)
@@ -101,7 +108,7 @@ def boundary_gated_cross_selective_scan(
             u_prime_flat, delta_prime_flat, As, Bs, Cs, zero_D, zero_delta_bias, False, 1, 1, ssoflex
         )
     else:
-        # High-performance PyTorch vectorized reference path
+        # High-performance Chunked Parallel Associative Scan fallback
         ys = pytorch_selective_scan_ref(u_prime_flat, delta_prime_flat, As, Bs, Cs, D=None)
 
     # 7. Add back skip connection D * u using ORIGINAL un-scaled input xs
@@ -111,14 +118,16 @@ def boundary_gated_cross_selective_scan(
     ys_2d = ys.view(B, K, -1, H, W)
     y = CrossMerge.apply(ys_2d)
 
-    # 9. Apply normalization
+    # 9. Apply normalization and return (B, C, H, W) consistently
     if out_norm is not None:
-        if out_norm_shape in ["v1"]:  # (B, C, H, W)
-            y = out_norm(y.view(B, -1, H, W)).permute(0, 2, 3, 1)
-        else:  # (B, L, C)
+        if out_norm_shape in ["v1"]:  # out_norm expects (B, C, H, W)
+            y = out_norm(y.view(B, -1, H, W)).contiguous()
+        else:  # out_norm expects (B, L, C)
             y = y.transpose(dim0=1, dim1=2).contiguous()
             y = out_norm(y).view(B, H, W, -1)
-            y = y.permute(0, 3, 1, 2).contiguous()  # Return to (B, C, H, W)
+            y = y.permute(0, 3, 1, 2).contiguous()
+    else:
+        y = y.view(B, -1, H, W).contiguous()
 
     return y.to(x.dtype)
 
@@ -143,10 +152,9 @@ class BG_SS2D(SS2D):
             x = self.in_rank(x)
 
         if s_map is None:
-            # Fallback to zero boundary strength (standard ungated Mamba)
             s_map = torch.zeros((x.shape[0], 1, x.shape[2], x.shape[3]), dtype=x.dtype, device=x.device)
         elif s_map.shape[-2:] != x.shape[-2:]:
-            s_map = F.interpolate(s_map, size=x.shape[-2:], mode='bilinear', align_corners=False)
+            s_map = F.adaptive_avg_pool2d(s_map, output_size=x.shape[-2:])
 
         x = boundary_gated_cross_selective_scan(
             x, s_map, self.x_proj_weight, self.dt_projs_weight, self.dt_projs_bias,
@@ -158,15 +166,17 @@ class BG_SS2D(SS2D):
             SelectiveScan=SelectiveScan,
         )
         if self.ssm_low_rank:
+            # out_rank is Linear(d_inner, d_expand)
+            x = x.permute(0, 2, 3, 1).contiguous()
             x = self.out_rank(x)
+            x = x.permute(0, 3, 1, 2).contiguous()
         return x
 
     def forward(self, x: torch.Tensor, s_map: torch.Tensor = None, **kwargs):
         x_proj = self.in_proj(x)
         if not self.disable_z:
             x_proj, z = x_proj.chunk(2, dim=1)
-            if not self.disable_z_act:
-                z1 = self.act(z)
+            z1 = self.act(z) if not self.disable_z_act else z
         if self.d_conv > 0 and hasattr(self, 'conv2d'):
             x_proj = self.conv2d(x_proj)
         x_proj = self.act(x_proj)
@@ -178,35 +188,89 @@ class BG_SS2D(SS2D):
         return out
 
 
-class BG_VSSBlock(VSSBlock):
-    """Boundary-Gated Visual State-Space Block (BG-VSSBlock)."""
+class BG_VSSBlock(nn.Module):
+    """Boundary-Gated Visual State-Space Block (BG-VSSBlock).
 
-    def __init__(self, in_channels: int = 0, hidden_dim: int = 0, *args, **kwargs):
-        super().__init__(in_channels=in_channels, hidden_dim=hidden_dim, *args, **kwargs)
-        self.in_channels = in_channels
-        self.hidden_dim = hidden_dim
-        # Replace internal SS2D with BG_SS2D
+    Constructs BG_SS2D, LSBlock, and RGBlock directly without redundant parent initialization,
+    ensuring every registered parameter participates in the forward and backward graph.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 0,
+        hidden_dim: int = 0,
+        drop_path: float = 0.0,
+        norm_layer: Callable[..., torch.nn.Module] = partial(LayerNorm2d, eps=1e-6),
+        ssm_d_state: int = 16,
+        ssm_ratio: float = 2.0,
+        ssm_rank_ratio: float = 2.0,
+        ssm_dt_rank: Any = "auto",
+        ssm_act_layer=nn.SiLU,
+        ssm_conv: int = 3,
+        ssm_conv_bias: bool = True,
+        ssm_drop_rate: float = 0.0,
+        ssm_init: str = "v0",
+        forward_type: str = "v2",
+        mlp_ratio: float = 4.0,
+        mlp_act_layer=nn.GELU,
+        mlp_drop_rate: float = 0.0,
+        use_checkpoint: bool = False,
+        post_norm: bool = False,
+        **kwargs,
+    ):
+        super().__init__()
+        dim = hidden_dim if hidden_dim > 0 else (in_channels if in_channels > 0 else 96)
+        in_c = in_channels if in_channels > 0 else dim
+        self.in_channels = in_c
+        self.hidden_dim = dim
+        self.ssm_branch = ssm_ratio > 0
+        self.mlp_branch = mlp_ratio > 0
+        self.use_checkpoint = use_checkpoint
+        self.post_norm = post_norm
+
+        self.proj_conv = nn.Sequential(
+            nn.Conv2d(in_c, dim, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.BatchNorm2d(dim),
+            nn.SiLU(inplace=True),
+        )
+
         if self.ssm_branch:
-            old_op = self.op
-            dim = hidden_dim if hidden_dim > 0 else (in_channels if in_channels > 0 else getattr(old_op.in_proj, 'in_channels', 96))
+            self.norm = norm_layer(dim)
             self.op = BG_SS2D(
                 d_model=dim,
-                d_state=old_op.d_state,
-                ssm_ratio=2.0,
-                ssm_rank_ratio=2.0,
-                dt_rank=old_op.dt_rank,
-                act_layer=nn.SiLU,
-                d_conv=old_op.d_conv,
-                dropout=0.0,
+                d_state=ssm_d_state,
+                ssm_ratio=ssm_ratio,
+                ssm_rank_ratio=ssm_rank_ratio,
+                dt_rank=ssm_dt_rank,
+                act_layer=ssm_act_layer,
+                d_conv=ssm_conv,
+                conv_bias=ssm_conv_bias,
+                dropout=ssm_drop_rate,
+                initialize=ssm_init,
+                forward_type=forward_type,
+            )
+
+        self.drop_path = DropPath(drop_path)
+        self.lsblock = LSBlock(dim, dim)
+
+        if self.mlp_branch:
+            self.norm2 = norm_layer(dim)
+            mlp_hidden_dim = int(dim * mlp_ratio)
+            self.mlp = RGBlock(
+                in_features=dim,
+                hidden_features=mlp_hidden_dim,
+                act_layer=mlp_act_layer,
+                drop=mlp_drop_rate,
+                channels_first=False,
             )
 
     def forward(self, input: torch.Tensor, s_map: torch.Tensor = None) -> torch.Tensor:
-        input = self.proj_conv(input)
-        if hasattr(self, 'lsblock') and self.lsblock is not None:
-            X1 = self.lsblock(input)
+        x_in = self.proj_conv(input)
+        x_ls = self.lsblock(x_in)
+        if self.ssm_branch:
+            x = x_in + self.drop_path(self.op(self.norm(x_ls), s_map=s_map))
         else:
-            X1 = input
-        x = input + self.drop_path(self.op(self.norm(X1), s_map=s_map))
+            x = x_ls
         if self.mlp_branch:
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x

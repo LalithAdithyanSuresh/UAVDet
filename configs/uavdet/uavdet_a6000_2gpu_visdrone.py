@@ -1,19 +1,16 @@
 # Configuration for 2x NVIDIA RTX A6000 (46-48 GB VRAM each)
-# Features:
-# - Backbone: BACSPUAV (Boundary-Aware Mamba with multi-scale LoG Prior)
-# - Neck: CSPMBFPN (Tiny-focused Feature Pyramid Network)
-# - Head: DensityRTMDetSepBNHead (Density-guided suppression via score_factors)
-# - High-throughput batching: batch_size=16 per GPU (32 per step)
-# - Delayed parameter sync: accumulative_counts=4 (effective batch size = 128)
-# - Mixed Precision: AmpOptimWrapper with dynamic loss scaling
-# - Periodic validation visualization: 10 images every 100 iterations
+# UAVDet V1 Architecture:
+# - Module 1: LoGPrior (BGR-calibrated opponent-color multi-scale LoG) fused into Stem + optional SPDConv
+# - Module 2: BACSPUAV (Boundary-Gated Mamba at strides 8/16/32 via exact Delta-decomposition + FeatureLoG)
+# - Module 3: CSPMBFPN with ScaleAxisSSM (Coarse-to-Fine S4 -> P3 -> P2 -> P1 scale-sequence scan)
+# - Module 4: DensityRTMDetSepBNHead (Residual feature modulation + score_factors suppression + Gaussian Focal Loss)
 
 _base_ = './uavdet-200e_visdrone.py'
 
 default_scope = 'mmdet'
 
 # ==============================================================================
-# Model Architecture
+# Model Architecture (UAVDet V1)
 # ==============================================================================
 model = dict(
     type='RTMDet',
@@ -30,14 +27,19 @@ model = dict(
         widen_factor=0.75,
         channel_attention=True,
         log_sigmas=(1.5, 3.0, 6.0),
+        log_channels=1,
+        fuse_log_in_stem=True,
+        use_spd=False,
         max_boundary_strength=4.0,
-        norm_cfg=dict(type='SyncBN')),
+        norm_cfg=dict(type='SyncBN'),
+        act_cfg=dict(inplace=True, type='SiLU')),
     neck=dict(
         type='CSPMBFPN',
         in_channels=[192, 192, 96, 96],
         out_channels=96,
         num_csp_blocks=2,
         expand_ratio=0.5,
+        use_scale_scan=True,
         norm_cfg=dict(type='SyncBN'),
         act_cfg=dict(inplace=True, type='SiLU')),
     bbox_head=dict(
@@ -51,6 +53,7 @@ model = dict(
         exp_on_reg=True,
         loss_density_weight=1.0,
         use_density_at_test=True,
+        use_feature_modulation=True,
         anchor_generator=dict(
             type='MlvlPointGenerator',
             offset=0,
@@ -77,35 +80,33 @@ model = dict(
         max_per_img=500))
 
 # ==============================================================================
-# Hardware Optimization: 2x RTX A6000 (46GB VRAM each)
+# Hardware Optimization: 2x RTX A6000 (48GB VRAM each)
 # ==============================================================================
-# High-throughput batch size with gradient accumulation:
-# batch_size=4 per GPU * 2 GPUs = 8 per step
-# accumulative_counts=16: 8 * 16 = 128 effective batch size per optimizer step
+# Fast iteration cadence with gradient accumulation:
+# batch_size=8 per GPU * 2 GPUs = 16 per micro-step
+# accumulative_counts=4: 16 * 4 = 64 effective batch size per optimizer step
 train_dataloader = dict(
-    batch_size=4,
+    batch_size=8,
     num_workers=0,
     persistent_workers=False,
     pin_memory=True)
 
 val_dataloader = dict(
-    batch_size=4,
+    batch_size=8,
     num_workers=0,
     persistent_workers=False)
 
 test_dataloader = dict(
-    batch_size=4,
+    batch_size=8,
     num_workers=0,
     persistent_workers=False)
 
 # Mixed Precision & Gradient Accumulation
-# accumulative_counts=16: Merges both GPUs' parameter updates every 16 iterations
-# Effective Batch Size = 4 (per GPU) * 2 (GPUs) * 16 (accum) = 128 images per update
 optim_wrapper = dict(
     type='AmpOptimWrapper',
     dtype='float16',
     loss_scale='dynamic',
-    accumulative_counts=16,
+    accumulative_counts=4,
     optimizer=dict(type='AdamW', lr=0.002, weight_decay=0.05),
     paramwise_cfg=dict(
         norm_decay_mult=0.0,
@@ -131,12 +132,6 @@ test_evaluator = dict(
 # ==============================================================================
 # Custom Periodic Visualization Hook
 # ==============================================================================
-# Every 100 iterations, outputs a 10-image validation batch grid:
-# Panel 1: Ground Truth
-# Panel 2: LoG Prior Map
-# Panel 3: Predictions
-# Panel 4: IoU Error Map (Green: TP, Yellow: FP/wrong, Red: Missed FN)
-# Panel 5: Mamba Adaptive Scanning Path Route
 custom_hooks = [
     dict(
         type='EMAHook',
@@ -165,7 +160,7 @@ default_hooks = dict(
 
 log_processor = dict(type='LogProcessor', window_size=1, by_epoch=True)
 
-# DDP: Enable find_unused_parameters to safely handle multi-branch modules
+# DDP configuration
 find_unused_parameters = True
 model_wrapper_cfg = dict(type='MMDistributedDataParallel', find_unused_parameters=True)
 

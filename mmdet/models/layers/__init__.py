@@ -5,7 +5,7 @@ from .brick_wrappers import (AdaptiveAvgPool2d, FrozenBatchNorm2d,
                              adaptive_avg_pool2d)
 from .conv_upsample import ConvUpsample
 from .csp_layer import CSPLayer, CSPLayerMB, CSPLayerBGMB
-from .log_prior import LoGPrior, BoundaryHead
+from .log_prior import LoGPrior, BoundaryHead, SPDConv, FeatureLoG
 from .bg_scan import BG_SS2D, BG_VSSBlock
 
 from .dropblock import DropBlock
@@ -64,6 +64,6 @@ __all__ = [
     'ConditionalDetrTransformerDecoderLayer', 'DinoTransformerDecoder',
     'CdnQueryGenerator', 'Mask2FormerTransformerEncoder',
     'SinePositionalEncoding3D', 'FrozenBatchNorm2d', 'CSPLayerMB',
-    'CSPLayerBGMB', 'LoGPrior', 'BoundaryHead', 'BG_SS2D', 'BG_VSSBlock'
+    'CSPLayerBGMB', 'LoGPrior', 'BoundaryHead', 'SPDConv', 'FeatureLoG',
+    'BG_SS2D', 'BG_VSSBlock'
 ]
-

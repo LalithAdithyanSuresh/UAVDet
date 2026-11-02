@@ -11,32 +11,23 @@ from torch.nn.modules.batchnorm import _BatchNorm
 
 from mmdet.registry import MODELS
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
-from ..layers import CSPLayer, CSPLayerBGMB, LoGPrior, BoundaryHead
+from ..layers import CSPLayer, CSPLayerBGMB, LoGPrior, BoundaryHead, SPDConv
 from .csp_darknet import SPPBottleneck
 
 
 @MODELS.register_module()
 class BACSPUAV(BaseModule):
-    """Boundary-Aware CSPUAV Backbone for Aerial Tiny Object Detection.
+    """Boundary-Aware CSPUAV Backbone for Aerial Tiny Object Detection (UAVDet V1).
 
-    Upgrades UAVDet's CSPUAV backbone:
-    1. Extracts high-frequency structural cues via multi-scale Laplacian of Gaussian (LoG Prior).
-    2. Keeps pure CNN downsampling at Stem and Stage 1 (stride 4, 160x160) to avoid raster-scan
-       context disruption and massive sequence memory at fine resolution.
-    3. Integrates Boundary-Gated State-Space scans (CSPLayerBGMB) at Stages 2, 3, and 4 (strides 8, 16, 32).
-    4. Dynamically flushes Mamba hidden states at structural target boundaries using the exact Delta-decomposition.
-    5. Fully plug-and-play compatible with the CSPMBFPN neck (output channels: 192, 192, 96, 96).
-
-    Args:
-        arch (str): Architecture configuration. Defaults to 'P5'.
-        deepen_factor (float): Depth multiplier. Defaults to 0.67.
-        widen_factor (float): Width multiplier. Defaults to 0.75.
-        out_indices (Sequence[int]): Output stage indices. Defaults to (1, 2, 3, 4).
-        frozen_stages (int): Stages to freeze. Defaults to -1.
-        use_depthwise (bool): Whether to use depthwise separable convs. Defaults to False.
-        channel_attention (bool): Whether to include channel attention. Defaults to True.
-        log_sigmas (tuple): Scales for LoG filter bank. Defaults to (1.5, 3.0, 6.0).
-        max_boundary_strength (float): Upper clamp on boundary flush strength. Defaults to 4.0.
+    Upgrades UAVDet's CSPUAV backbone according to the V1 specification:
+    1. Extracts high-frequency structural cues via multi-scale Laplacian of Gaussian (LoGPrior, Fix 5).
+    2. Fuses the LoG prior alongside RGB directly into the stem (3 + C_log input channels, Fix 1),
+       with optional Space-to-Depth (SPDConv) lossless downsampling (`use_spd=True/False`).
+    3. Keeps pure CNN processing at Stage 1 (stride 4, 160x160) to preserve sub-16px local geometry
+       and avoid raster-scan memory bloat.
+    4. Integrates Boundary-Gated State-Space scans (CSPLayerBGMB) at Stages 2, 3, and 4 (strides 8, 16, 32)
+       guided by per-stage BoundaryHeads combining pooled image LoG and trainable FeatureLoG (Fix 2 & Fix 3).
+    5. Preserves custom analytical initializations (LoG kernels and -4.5 open-gate bias) across `init_weights()`.
     """
 
     # in_channels, mid_channels, out_channels, num_blocks, add_identity, use_spp
@@ -66,6 +57,9 @@ class BACSPUAV(BaseModule):
         act_cfg: ConfigType = dict(type='SiLU'),
         norm_eval: bool = False,
         log_sigmas: tuple = (1.5, 3.0, 6.0),
+        log_channels: int = 1,
+        fuse_log_in_stem: bool = True,
+        use_spd: bool = False,
         max_boundary_strength: float = 4.0,
         init_cfg: OptMultiConfig = dict(
             type='Kaiming',
@@ -80,29 +74,43 @@ class BACSPUAV(BaseModule):
         if arch_ovewrite:
             arch_setting = arch_ovewrite
 
+        assert set(out_indices).issubset(i for i in range(len(arch_setting) + 1))
+        if frozen_stages not in range(-1, len(arch_setting) + 1):
+            raise ValueError(f'frozen_stages must be in range(-1, {len(arch_setting) + 1}), got {frozen_stages}')
+
         self.out_indices = out_indices
         self.frozen_stages = frozen_stages
         self.use_depthwise = use_depthwise
         self.norm_eval = norm_eval
+        self.fuse_log_in_stem = fuse_log_in_stem
+        self.use_spd = use_spd
 
-        # 1. Multi-scale Spatio-Frequency LoG Prior
-        self.log_prior = LoGPrior(sigmas=log_sigmas, out_channels=1)
+        # 1. Multi-scale Spatio-Frequency LoG Prior (Fix 5)
+        self.log_prior = LoGPrior(sigmas=log_sigmas, out_channels=log_channels)
 
         conv = DepthwiseSeparableConvModule if use_depthwise else ConvModule
 
-        # 2. Convolutional Stem (stride 2 downsampling)
+        # 2. LoG-Fused Convolutional Stem (Fix 1)
+        stem_in_channels = 3 + (log_channels if fuse_log_in_stem else 0)
         stem_out = int(arch_setting[0][0] * widen_factor)
+        if use_spd:
+            stem_down = SPDConv(stem_in_channels, stem_out // 2, norm_cfg=norm_cfg, act_cfg=act_cfg)
+        else:
+            stem_down = ConvModule(
+                stem_in_channels, stem_out // 2, 3, padding=1, stride=2, norm_cfg=norm_cfg, act_cfg=act_cfg
+            )
+
         self.stem = nn.Sequential(
-            ConvModule(3, stem_out // 2, 3, padding=1, stride=2, norm_cfg=norm_cfg, act_cfg=act_cfg),
+            stem_down,
             ConvModule(stem_out // 2, stem_out // 2, 3, padding=1, stride=1, norm_cfg=norm_cfg, act_cfg=act_cfg),
             ConvModule(stem_out // 2, stem_out, 3, padding=1, stride=1, norm_cfg=norm_cfg, act_cfg=act_cfg)
         )
 
-        # 3. Hierarchical Stages
+        # 3. Hierarchical Stages (Stages 1..4)
         self.downsample_convs = nn.ModuleList()
         self.stage_blocks = nn.ModuleList()
-        self.boundary_heads = nn.ModuleList()
-        self.spp_blocks = nn.ModuleList()
+        self.boundary_heads = nn.ModuleDict()
+        self.spp_blocks = nn.ModuleDict()
 
         for i, (in_channels, mid_channels, out_channels, num_blocks, add_identity, use_spp) in enumerate(arch_setting):
             in_c = int(in_channels * widen_factor)
@@ -110,21 +118,24 @@ class BACSPUAV(BaseModule):
             out_c = int(out_channels * widen_factor)
             num_b = max(round(num_blocks * deepen_factor), 1)
 
-            # Downsample conv from previous stage
-            down_conv = conv(
-                in_c,
-                mid_c,
-                3,
-                stride=2,
-                padding=1,
-                conv_cfg=conv_cfg,
-                norm_cfg=norm_cfg,
-                act_cfg=act_cfg
-            )
+            # Downsample conv from previous stage (optional SPDConv at stage 1)
+            if i == 0 and use_spd:
+                down_conv = SPDConv(in_c, mid_c, norm_cfg=norm_cfg, act_cfg=act_cfg)
+            else:
+                down_conv = conv(
+                    in_c,
+                    mid_c,
+                    3,
+                    stride=2,
+                    padding=1,
+                    conv_cfg=conv_cfg,
+                    norm_cfg=norm_cfg,
+                    act_cfg=act_cfg
+                )
             self.downsample_convs.append(down_conv)
 
             if i == 0:
-                # Stage 1 (stride 4): Pure CNN CSPLayer to avoid fine-resolution Mamba memory bloat
+                # Stage 1 (stride 4): Pure CNN CSPLayer to preserve sub-16px features without raster-scan artifacts
                 block_layer = CSPLayer(
                     mid_c,
                     out_c,
@@ -139,11 +150,14 @@ class BACSPUAV(BaseModule):
                     act_cfg=act_cfg
                 )
                 self.stage_blocks.append(block_layer)
-                self.boundary_heads.append(nn.Identity())
             else:
-                # Stages 2, 3, 4: Boundary-Gated Mamba Layer (CSPLayerBGMB)
-                b_head = BoundaryHead(in_channels=mid_c, mid_channels=32, max_strength=max_boundary_strength)
-                self.boundary_heads.append(b_head)
+                # Stages 2, 3, 4 (strides 8, 16, 32): Boundary-Gated Mamba Layer (CSPLayerBGMB)
+                self.boundary_heads[str(i)] = BoundaryHead(
+                    in_channels=mid_c,
+                    log_channels=log_channels,
+                    mid_channels=32,
+                    max_strength=max_boundary_strength
+                )
 
                 block_layer = CSPLayerBGMB(
                     mid_c,
@@ -161,7 +175,7 @@ class BACSPUAV(BaseModule):
                 self.stage_blocks.append(block_layer)
 
             if use_spp:
-                spp = SPPBottleneck(
+                self.spp_blocks[str(i)] = SPPBottleneck(
                     out_c,
                     out_c,
                     kernel_sizes=spp_kernel_sizes,
@@ -169,24 +183,64 @@ class BACSPUAV(BaseModule):
                     norm_cfg=norm_cfg,
                     act_cfg=act_cfg
                 )
-                self.spp_blocks.append(spp)
-            else:
-                self.spp_blocks.append(nn.Identity())
 
-        # Cache variables for visualization hooks
+        # Diagnostics cache for PeriodicBatchVisualizationHook
         self.last_log_prior = None
         self.last_boundary_strengths = []
 
+    def init_weights(self) -> None:
+        """Initialize backbone weights while preserving analytical LoG kernels and open-gate biases."""
+        super().init_weights()
+        self.log_prior.init_weights()
+        for b_head in self.boundary_heads.values():
+            b_head.init_weights()
+
+    def _freeze_stages(self) -> None:
+        if self.frozen_stages >= 0:
+            self.stem.eval()
+            for param in self.stem.parameters():
+                param.requires_grad = False
+            for i in range(self.frozen_stages):
+                self.downsample_convs[i].eval()
+                self.stage_blocks[i].eval()
+                for param in self.downsample_convs[i].parameters():
+                    param.requires_grad = False
+                for param in self.stage_blocks[i].parameters():
+                    param.requires_grad = False
+                if str(i) in self.boundary_heads:
+                    self.boundary_heads[str(i)].eval()
+                    for param in self.boundary_heads[str(i)].parameters():
+                        param.requires_grad = False
+                if str(i) in self.spp_blocks:
+                    self.spp_blocks[str(i)].eval()
+                    for param in self.spp_blocks[str(i)].parameters():
+                        param.requires_grad = False
+
+    def train(self, mode: bool = True) -> None:
+        super().train(mode)
+        self._freeze_stages()
+        if mode and self.norm_eval:
+            for m in self.modules():
+                if isinstance(m, _BatchNorm):
+                    m.eval()
+
     def forward(self, x: Tensor) -> Tuple[Tensor, ...]:
         # 1. Compute multi-scale LoG structural prior from normalized input
-        log_map = self.log_prior(x)  # (B, 1, H, W)
+        log_map = self.log_prior(x)  # (B, C_log, H, W)
         self.last_log_prior = log_map.detach()
         self.last_boundary_strengths = []
 
-        # 2. Pass through stem (stride 2)
-        feat = self.stem(x)
+        # 2. Fuse LoG prior alongside RGB into the stem (Fix 1)
+        if self.fuse_log_in_stem:
+            stem_in = torch.cat([x, log_map], dim=1)
+        else:
+            stem_in = x
+        feat = self.stem(stem_in)
 
         outs = []
+        if 0 in self.out_indices:
+            outs.append(feat)
+
         for i in range(len(self.downsample_convs)):
             feat = self.downsample_convs[i](feat)
 
@@ -194,13 +248,13 @@ class BACSPUAV(BaseModule):
                 feat = self.stage_blocks[i](feat)
             else:
                 # Generate boundary flush strength s_t from stage features and LoG prior
-                s_map = self.boundary_heads[i](feat, log_map)
+                s_map = self.boundary_heads[str(i)](feat, log_map)
                 self.last_boundary_strengths.append(s_map.detach())
                 feat = self.stage_blocks[i](feat, s_map=s_map)
 
-            feat = self.spp_blocks[i](feat)
+            if str(i) in self.spp_blocks:
+                feat = self.spp_blocks[str(i)](feat)
 
-            # Stage index 1 to 4 matches out_indices
             if (i + 1) in self.out_indices:
                 outs.append(feat)
 
