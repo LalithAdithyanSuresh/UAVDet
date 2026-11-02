@@ -5,7 +5,21 @@ from inspect import signature
 from typing import List, Optional, Tuple
 
 import torch
-from mmcv.ops import batched_nms
+from mmcv.ops import batched_nms as _mmcv_batched_nms
+
+
+def batched_nms(bboxes, scores, idxs, nms_cfg, class_agnostic=False):
+    try:
+        return _mmcv_batched_nms(bboxes, scores, idxs, nms_cfg, class_agnostic=class_agnostic)
+    except Exception:
+        import torchvision.ops
+        iou_thr = float(nms_cfg.get('iou_threshold', 0.65)) if isinstance(nms_cfg, dict) else 0.65
+        if class_agnostic:
+            keep = torchvision.ops.nms(bboxes.float(), scores.float(), iou_thr)
+        else:
+            keep = torchvision.ops.batched_nms(bboxes.float(), scores.float(), idxs, iou_thr)
+        dets = torch.cat([bboxes[keep], scores[keep, None]], dim=-1)
+        return dets, keep
 from mmengine.config import ConfigDict
 from mmengine.model import BaseModule, constant_init
 from mmengine.structures import InstanceData

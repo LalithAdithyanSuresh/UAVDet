@@ -38,6 +38,11 @@ def _install_clean_log_filter():
         '"HardDiskBackend" is the alias',
         'Gradient accumulative may slightly decrease performance',
         'Distributed training:',
+        'The value is the same before and after calling `init_weights`',
+        'Initialized by user-defined `init_weights`',
+        'KaimingInit:',
+        'ConstantInit:',
+        'NormalInit:',
     )
     orig_handle = logging.Handler.handle
 
@@ -56,17 +61,55 @@ def _install_clean_log_filter():
 
 _install_clean_log_filter()
 
+
+def _fallback_nms(bboxes, scores, iou_threshold=0.5, offset=0):
+    import torch
+    if bboxes.numel() == 0:
+        return torch.empty((0,), dtype=torch.int64, device=bboxes.device)
+    try:
+        import torchvision.ops
+        return torchvision.ops.nms(bboxes.float(), scores.float(), float(iou_threshold))
+    except Exception:
+        x1, y1, x2, y2 = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
+        areas = (x2 - x1 + offset).clamp(min=0) * (y2 - y1 + offset).clamp(min=0)
+        order = scores.argsort(descending=True)
+        keep = []
+        while order.numel() > 0:
+            i = order[0]
+            keep.append(i)
+            if order.numel() == 1:
+                break
+            rest = order[1:]
+            xx1 = torch.maximum(x1[i], x1[rest])
+            yy1 = torch.maximum(y1[i], y1[rest])
+            xx2 = torch.minimum(x2[i], x2[rest])
+            yy2 = torch.minimum(y2[i], y2[rest])
+            w = (xx2 - xx1 + offset).clamp(min=0)
+            h = (yy2 - yy1 + offset).clamp(min=0)
+            inter = w * h
+            ovr = inter / (areas[i] + areas[rest] - inter + 1e-6)
+            order = rest[ovr <= iou_threshold]
+        return torch.stack(keep).to(dtype=torch.int64)
+
+
 # Ensure fallback for mmcv._ext if compiled C++ ops are not present
 try:
-    import mmcv._ext
+    import mmcv._ext as _loaded_ext
+    if getattr(_loaded_ext, '__file__', None) is None:
+        setattr(_loaded_ext, 'nms', staticmethod(_fallback_nms))
 except Exception:
     class _FallbackMMCVExt(types.ModuleType):
+        nms = staticmethod(_fallback_nms)
+
         def __getattr__(self, name):
             if name.startswith("__") and name.endswith("__"):
                 raise AttributeError(f"module 'mmcv._ext' has no attribute '{name}'")
+            if name == "nms":
+                return _fallback_nms
             def _dummy_op(*args, **kwargs):
                 return None
             return _dummy_op
+
     _ext_mod = _FallbackMMCVExt("mmcv._ext")
     _ext_mod.__spec__ = importlib.machinery.ModuleSpec("mmcv._ext", loader=None)
     _ext_mod.__loader__ = None
@@ -132,9 +175,6 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
-    # When using PyTorch version >= 2.0.0, the `torch.distributed.launch`
-    # will pass the `--local-rank` parameter to `tools/train.py` instead
-    # of `--local_rank`.
     parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
@@ -197,7 +237,6 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
     configured_accum = int(cfg.optim_wrapper.get('accumulative_counts', 1))
     target_effective_bs = configured_bs * world_size * configured_accum
 
-    # Query minimum free VRAM across all visible GPUs so all DDP ranks share a conservative ceiling
     free_bytes_list = []
     total_bytes_list = []
     for i in range(num_devices):
@@ -208,7 +247,6 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
     min_total_bytes = min(total_bytes_list)
     vram_budget_bytes = int(min_free_bytes * vram_safety_ratio)
 
-    # Candidate batch sizes in descending order starting from configured_bs
     raw_candidates = [configured_bs, 16, 12, 8, 6, 4, 2, 1]
     candidates = []
     for c in raw_candidates:
@@ -306,7 +344,6 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Synchronize selected_bs across local DDP ranks via shared temp file so all ranks use identical batch_size
     if world_size > 1:
         sync_tag = f"{os.environ.get('MASTER_PORT', '29500')}_{os.getppid()}"
         tmp_dir = tempfile.gettempdir()
@@ -350,29 +387,23 @@ def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
 def main():
     args = parse_args()
 
-    # Reduce the number of repeated compilations and improve
-    # training speed.
     setup_cache_size_limit_of_dynamo()
 
-    # load config
     cfg = Config.fromfile(args.config)
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
         cfg.work_dir = args.work_dir
     elif cfg.get('work_dir', None) is None:
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
 
-    # enable automatic-mixed-precision training
     if args.amp is True:
         cfg.optim_wrapper.type = 'AmpOptimWrapper'
         cfg.optim_wrapper.loss_scale = 'dynamic'
 
-    # enable automatically scaling LR
     if args.auto_scale_lr:
         if 'auto_scale_lr' in cfg and \
                 'enable' in cfg.auto_scale_lr and \
@@ -384,7 +415,6 @@ def main():
                                '"auto_scale_lr.base_batch_size" in your'
                                ' configuration file.')
 
-    # resume is determined in this priority: resume from > auto_resume
     if args.resume == 'auto':
         cfg.resume = True
         cfg.load_from = None
@@ -392,7 +422,6 @@ def main():
         cfg.resume = True
         cfg.load_from = args.resume
 
-    # Automatic pre-training batch size VRAM probing
     if not args.no_auto_bs:
         cfg = auto_select_batch_size(cfg, use_amp=args.amp)
 
@@ -403,7 +432,6 @@ def main():
         )
         return
 
-    # Build and run training with automatic OOM fallback
     while True:
         try:
             if 'runner_type' not in cfg:

@@ -1,6 +1,10 @@
 # Standalone mathematical and architectural unit tests for UAVDet V1 modules
 import sys
 import os
+import logging
+import warnings
+warnings.filterwarnings('ignore')
+logging.disable(logging.INFO)
 import importlib.util
 import math
 import types
