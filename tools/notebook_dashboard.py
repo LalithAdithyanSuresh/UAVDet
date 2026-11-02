@@ -11,18 +11,51 @@ Usage in any Jupyter cell:
 
 import os
 import os.path as osp
+import sys
 import glob
 import json
 import time
 import re
 
-def show_dashboard(work_dir="./work_dirs/uavdet_a6000_2gpu_visdrone", max_images=4):
+
+def _find_repo_root():
+    """Finds the UAVDet repository root directory regardless of current working dir."""
+    cur = osp.abspath(os.getcwd())
+    if osp.basename(cur) == "tools":
+        return osp.dirname(cur)
+    if osp.exists(osp.join(cur, "configs")):
+        return cur
+    parent = osp.dirname(cur)
+    if osp.exists(osp.join(parent, "configs")):
+        return parent
+    return cur
+
+
+def _resolve_work_dir(work_dir):
+    """Resolves work_dir path robustly whether run from repo root or tools/ subfolder."""
+    if osp.isabs(work_dir) and osp.exists(work_dir):
+        return work_dir
+    if osp.exists(work_dir):
+        return osp.abspath(work_dir)
+    root = _find_repo_root()
+    cand = osp.join(root, work_dir)
+    if osp.exists(cand):
+        return cand
+    cand2 = osp.join(root, "work_dirs", "uavdet_a6000_2gpu_visdrone")
+    if osp.exists(cand2):
+        return cand2
+    return osp.join(root, work_dir)
+
+
+def show_dashboard(work_dir="work_dirs/uavdet_a6000_2gpu_visdrone", max_images=4):
     """Renders an interactive, styled training monitor directly in Jupyter output."""
     try:
-        from IPython.display import display, HTML, clear_output
+        from IPython.display import display, HTML
     except ImportError:
         print("[Error] IPython is required for in-notebook dashboard.")
         return
+
+    work_dir = _resolve_work_dir(work_dir)
 
     # 1. Parse latest scalars.json
     scalar_files = glob.glob(osp.join(work_dir, "**", "scalars.json"), recursive=True)
@@ -99,7 +132,6 @@ def show_dashboard(work_dir="./work_dirs/uavdet_a6000_2gpu_visdrone", max_images
         for fpath, mtime in found_imgs[:max_images]:
             fname = osp.basename(fpath)
             t_str = time.strftime("%H:%M:%S", time.localtime(mtime))
-            # Encode as base64 or serve direct file
             import base64
             with open(fpath, "rb") as img_f:
                 b64 = base64.b64encode(img_f.read()).decode("utf-8")
@@ -114,7 +146,7 @@ def show_dashboard(work_dir="./work_dirs/uavdet_a6000_2gpu_visdrone", max_images
             """
         images_html += "</div>"
     else:
-        images_html = "<div style='color:#94a3b8; font-size:12px; padding:16px;'>Visualizations will appear here at iterations 1, 2, 5, 10, 20, then every 50 iters.</div>"
+        images_html = f"<div style='color:#94a3b8; font-size:12px; padding:16px;'>Visualizations will appear here at iterations 1, 2, 5, 10, 20, then every 50 iters.<br><span style='color:#64748b; font-size:11px;'>Monitoring: {work_dir}</span></div>"
 
     html = f"""
     <div style="background:#0f172a; border:1px solid #1e293b; border-radius:12px; padding:20px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#f8fafc; max-width:960px;">
@@ -167,10 +199,10 @@ def show_dashboard(work_dir="./work_dirs/uavdet_a6000_2gpu_visdrone", max_images
     display(HTML(html))
 
 
-def live_loop(interval=5, count=100):
+def live_loop(interval=5, count=500, work_dir="work_dirs/uavdet_a6000_2gpu_visdrone"):
     """Refreshes the dashboard in-place every `interval` seconds."""
     from IPython.display import clear_output
     for _ in range(count):
         clear_output(wait=True)
-        show_dashboard()
+        show_dashboard(work_dir=work_dir)
         time.sleep(interval)
