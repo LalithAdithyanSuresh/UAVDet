@@ -174,13 +174,17 @@ train_cfg = dict(
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
-# Visualizer & Logging Backends (Local scalars + TensorBoard)
+# Visualizer & Logging Backends (Local scalars + auto-detect TensorBoard)
+vis_backends = [dict(type='LocalVisBackend')]
+try:
+    import tensorboard  # noqa: F401
+    vis_backends.append(dict(type='TensorboardVisBackend'))
+except ImportError:
+    pass
+
 visualizer = dict(
     type='DetLocalVisualizer',
-    vis_backends=[
-        dict(type='LocalVisBackend'),
-        dict(type='TensorboardVisBackend')
-    ],
+    vis_backends=vis_backends,
     name='visualizer')
 
 # DDP configuration (all parameters participate in forward/backward; False avoids redundant graph traversal)
