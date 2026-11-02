@@ -677,39 +677,113 @@ def launch_training(config_file, num_gpus=None, resume=False, port=29500):
     print(f"Venv Python:  {env.python_bin}")
     print("=" * 75 + "\n")
 
-    if num_gpus > 1:
-        cmd = [
-            env.torchrun_bin,
-            f"--nproc_per_node={num_gpus}",
-            f"--master_port={port}",
-            train_script,
-            config_file,
-            "--launcher", "pytorch"
+    # Pre-flight batch size VRAM probe in a clean single-GPU process
+    current_bs = 8
+    current_accum = 4
+    target_eff_bs = 64
+    try:
+        probe_env = os.environ.copy()
+        probe_env["WORLD_SIZE"] = str(max(1, num_gpus))
+        probe_env["LOCAL_RANK"] = "0"
+        probe_cmd = [env.python_bin, train_script, config_file, "--probe-only"]
+        print("[Pre-Flight Probe] Identifying optimal batch size before DDP launch...")
+        res = subprocess.run(probe_cmd, text=True, capture_output=True, env=probe_env)
+        for line in res.stdout.splitlines():
+            if "[AutoBatchProbe]" in line:
+                print(line)
+            elif line.startswith("PROBE_RESULT:"):
+                parts = line.replace("PROBE_RESULT:", "").split(",")
+                for part in parts:
+                    if part.startswith("batch_size="):
+                        current_bs = int(part.split("=")[1])
+                    elif part.startswith("accumulative_counts="):
+                        current_accum = int(part.split("=")[1])
+    except Exception as e:
+        print(f"[Pre-Flight Probe Notice] Proceeding with default batch_size={current_bs} ({e})")
+
+    # Automatic OOM-resilient training supervisor loop
+    bs_fallback_chain = [b for b in [current_bs, 8, 6, 4, 2, 1] if b <= current_bs]
+    # Deduplicate while preserving descending order
+    bs_candidates = []
+    for b in bs_fallback_chain:
+        if b not in bs_candidates:
+            bs_candidates.append(b)
+
+    for attempt_idx, bs in enumerate(bs_candidates):
+        eff_world = max(1, num_gpus)
+        accum = max(1, (target_eff_bs + (bs * eff_world) - 1) // (bs * eff_world))
+        run_env = os.environ.copy()
+        # Skip redundant per-rank probe inside torchrun since we probed & pass explicit bs/accum
+        run_env["UAVDET_SKIP_BS_PROBE"] = "1"
+
+        cfg_overrides = [
+            "--cfg-options",
+            f"train_dataloader.batch_size={bs}",
+            f"val_dataloader.batch_size={bs}",
+            f"test_dataloader.batch_size={bs}",
+            f"optim_wrapper.accumulative_counts={accum}",
         ]
-        if resume:
+
+        if num_gpus > 1:
+            cmd = [
+                env.torchrun_bin,
+                f"--nproc_per_node={num_gpus}",
+                f"--master_port={port + attempt_idx}",
+                train_script,
+                config_file,
+                "--launcher", "pytorch",
+            ] + cfg_overrides
+        else:
+            cmd = [
+                env.python_bin,
+                train_script,
+                config_file,
+            ] + cfg_overrides
+
+        if resume or attempt_idx > 0:
             cmd.append("--resume")
-        print(f"Launching Multi-GPU DDP Training ({num_gpus} GPUs):")
+
+        mode_str = f"Multi-GPU DDP ({num_gpus} GPUs)" if num_gpus > 1 else "Single-GPU"
+        print(f"\nLaunching {mode_str} Training [batch_size={bs}/GPU, accumulative_counts={accum}]:")
         print(f"  {' '.join(cmd)}\n")
         sys.stdout.flush()
-        if sys.platform != "win32":
-            os.execv(env.torchrun_bin, cmd)
+
+        oom_detected = False
+        p = subprocess.Popen(
+            cmd,
+            cwd=env.repo_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            env=run_env,
+        )
+        for line in p.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if (
+                "OutOfMemoryError" in line
+                or "CUDA out of memory" in line
+                or "[UAVDET_OOM_DETECTED]" in line
+                or "[UAVDET_OOM_RETRY]" in line
+            ):
+                oom_detected = True
+
+        p.wait()
+        if p.returncode == 0:
+            print("\n[OK] Training completed successfully!")
+            return
+
+        if (oom_detected or p.returncode == 88) and bs > 1:
+            print(
+                f"\n[OOM Supervisor] Detected CUDA OOM with batch_size={bs}. "
+                f"Cooling down GPUs for 3s and automatically retrying next smaller batch size..."
+            )
+            time.sleep(3.0)
+            continue
         else:
-            subprocess.check_call(cmd, env=os.environ)
-    else:
-        cmd = [
-            env.python_bin,
-            train_script,
-            config_file
-        ]
-        if resume:
-            cmd.append("--resume")
-        print(f"Launching Single-GPU Training:")
-        print(f"  {' '.join(cmd)}\n")
-        sys.stdout.flush()
-        if sys.platform != "win32":
-            os.execv(env.python_bin, cmd)
-        else:
-            subprocess.check_call(cmd, env=os.environ)
+            sys.exit(p.returncode)
 
 
 # ── Main Entrypoint ────────────────────────────────────────────────────────

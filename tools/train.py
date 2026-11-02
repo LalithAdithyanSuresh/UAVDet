@@ -1,12 +1,20 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import copy
+import gc
+import importlib.machinery
+import math
 import os
 import os.path as osp
 import sys
+import tempfile
+import time
 import types
 import warnings
 
-import importlib.machinery
+# Ensure dynamic CUDA memory segments to prevent allocator fragmentation
+if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Ensure fallback for mmcv._ext if compiled C++ ops are not present
 try:
@@ -24,6 +32,7 @@ except Exception:
     _ext_mod.__loader__ = None
     sys.modules["mmcv._ext"] = _ext_mod
 
+import torch
 import torch.multiprocessing
 try:
     torch.multiprocessing.set_sharing_strategy('file_system')
@@ -31,10 +40,10 @@ except Exception:
     pass
 
 from mmengine.config import Config, DictAction
-from mmengine.registry import RUNNERS
+from mmengine.registry import MODELS, RUNNERS
 from mmengine.runner import Runner
 
-from mmdet.utils import setup_cache_size_limit_of_dynamo
+from mmdet.utils import register_all_modules, setup_cache_size_limit_of_dynamo
 
 
 def parse_args():
@@ -50,6 +59,16 @@ def parse_args():
         '--auto-scale-lr',
         action='store_true',
         help='enable automatically scaling LR.')
+    parser.add_argument(
+        '--no-auto-bs',
+        action='store_true',
+        default=False,
+        help='disable automatic pre-training batch size VRAM probing')
+    parser.add_argument(
+        '--probe-only',
+        action='store_true',
+        default=False,
+        help='only probe and print the optimal safe batch_size and accumulative_counts, then exit')
     parser.add_argument(
         '--resume',
         nargs='?',
@@ -82,6 +101,220 @@ def parse_args():
         os.environ['LOCAL_RANK'] = str(args.local_rank)
 
     return args
+
+
+def _replace_syncbn_with_bn(cfg_obj):
+    """Recursively replaces 'SyncBN' with 'BN' in a copied model config dict
+    so pre-DDP memory probing can run without an initialized process group."""
+    if isinstance(cfg_obj, dict):
+        for k, v in list(cfg_obj.items()):
+            if k == 'type' and v == 'SyncBN':
+                cfg_obj[k] = 'BN'
+            else:
+                _replace_syncbn_with_bn(v)
+    elif isinstance(cfg_obj, (list, tuple)):
+        for item in cfg_obj:
+            _replace_syncbn_with_bn(item)
+
+
+def _sum_tensors(obj):
+    """Recursively sums `.mean()` of all tensors in nested tuples/lists."""
+    if isinstance(obj, torch.Tensor):
+        return obj.float().mean()
+    elif isinstance(obj, (list, tuple)):
+        total = 0.0
+        for item in obj:
+            total = total + _sum_tensors(item)
+        return total
+    elif isinstance(obj, dict):
+        total = 0.0
+        for item in obj.values():
+            total = total + _sum_tensors(item)
+        return total
+    return 0.0
+
+
+def auto_select_batch_size(cfg, use_amp=False, vram_safety_ratio=0.78):
+    """Automatically probes candidate batch sizes before training by running a
+    synthetic forward + backward pass on the active GPU, selecting the largest
+    batch size that fits safely within VRAM without OOM, and scaling
+    `optim_wrapper.accumulative_counts` to preserve the effective batch size.
+    """
+    if not torch.cuda.is_available():
+        return cfg
+
+    if os.environ.get('UAVDET_SKIP_BS_PROBE', '0') == '1':
+        return cfg
+
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    num_devices = torch.cuda.device_count()
+    device_idx = local_rank if local_rank < num_devices else 0
+    device = torch.device(f'cuda:{device_idx}')
+    torch.cuda.set_device(device)
+
+    configured_bs = int(cfg.train_dataloader.get('batch_size', 8))
+    configured_accum = int(cfg.optim_wrapper.get('accumulative_counts', 1))
+    target_effective_bs = configured_bs * world_size * configured_accum
+
+    # Query minimum free VRAM across all visible GPUs so all DDP ranks share a conservative ceiling
+    free_bytes_list = []
+    total_bytes_list = []
+    for i in range(num_devices):
+        free_b, total_b = torch.cuda.mem_get_info(i)
+        free_bytes_list.append(free_b)
+        total_bytes_list.append(total_b)
+    min_free_bytes = min(free_bytes_list)
+    min_total_bytes = min(total_bytes_list)
+    vram_budget_bytes = int(min_free_bytes * vram_safety_ratio)
+
+    # Candidate batch sizes in descending order starting from configured_bs
+    raw_candidates = [configured_bs, 16, 12, 8, 6, 4, 2, 1]
+    candidates = []
+    for c in raw_candidates:
+        if 1 <= c <= configured_bs and c not in candidates:
+            candidates.append(c)
+    candidates.sort(reverse=True)
+
+    if local_rank == 0:
+        print(
+            f'\n[AutoBatchProbe] Probing safe batch size on GPU {device_idx} '
+            f'(Free VRAM: {min_free_bytes / (1024**3):.2f} GiB / '
+            f'{min_total_bytes / (1024**3):.2f} GiB, '
+            f'Safety ceiling: {vram_budget_bytes / (1024**3):.2f} GiB, '
+            f'Candidates: {candidates})...'
+        )
+
+    register_all_modules(init_default_scope=True)
+    probe_model_cfg = copy.deepcopy(cfg.model.to_dict() if hasattr(cfg.model, 'to_dict') else dict(cfg.model))
+    _replace_syncbn_with_bn(probe_model_cfg)
+
+    amp_enabled = use_amp or (cfg.optim_wrapper.get('type', '') == 'AmpOptimWrapper')
+    selected_bs = 1
+
+    backbone = None
+    neck = None
+    bbox_head = None
+
+    try:
+        backbone = MODELS.build(probe_model_cfg['backbone']).to(device).train()
+        neck = MODELS.build(probe_model_cfg['neck']).to(device).train() if 'neck' in probe_model_cfg else None
+        bbox_head = MODELS.build(probe_model_cfg['bbox_head']).to(device).train() if 'bbox_head' in probe_model_cfg else None
+
+        for bs in candidates:
+            x = None
+            feats = None
+            outs = None
+            loss = None
+            try:
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats(device)
+
+                x = torch.randn(bs, 3, 640, 640, device=device, dtype=torch.float32)
+                with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=torch.float16):
+                    feats = backbone(x)
+                    if neck is not None:
+                        feats = neck(feats)
+                    if bbox_head is not None:
+                        outs = bbox_head(feats)
+                    else:
+                        outs = feats
+                    loss = _sum_tensors(outs)
+
+                loss.backward()
+                backbone.zero_grad(set_to_none=True)
+                if neck is not None:
+                    neck.zero_grad(set_to_none=True)
+                if bbox_head is not None:
+                    bbox_head.zero_grad(set_to_none=True)
+                torch.cuda.synchronize(device)
+
+                peak_bytes = torch.cuda.max_memory_allocated(device)
+                if local_rank == 0:
+                    print(
+                        f'  [AutoBatchProbe] Tested batch_size={bs}: '
+                        f'peak VRAM = {peak_bytes / (1024**3):.2f} GiB '
+                        f'(budget = {vram_budget_bytes / (1024**3):.2f} GiB)'
+                    )
+
+                del x, feats, outs, loss
+                gc.collect()
+                torch.cuda.empty_cache()
+
+                if peak_bytes <= vram_budget_bytes:
+                    selected_bs = bs
+                    break
+                else:
+                    if local_rank == 0:
+                        print(f'  [AutoBatchProbe] batch_size={bs} exceeded safety budget; trying next smaller batch size...')
+            except RuntimeError as e:
+                del x, feats, outs, loss
+                if backbone is not None:
+                    backbone.zero_grad(set_to_none=True)
+                if neck is not None:
+                    neck.zero_grad(set_to_none=True)
+                if bbox_head is not None:
+                    bbox_head.zero_grad(set_to_none=True)
+                gc.collect()
+                torch.cuda.empty_cache()
+                if 'out of memory' in str(e).lower():
+                    if local_rank == 0:
+                        print(f'  [AutoBatchProbe] batch_size={bs} triggered CUDA OOM during probe; trying smaller batch size...')
+                    continue
+                else:
+                    if local_rank == 0:
+                        print(f'  [AutoBatchProbe] Notice during probe ({e}); falling back to configured batch_size={configured_bs}')
+                    selected_bs = configured_bs
+                    break
+    except Exception as e:
+        if local_rank == 0:
+            print(f'[AutoBatchProbe] Probe setup notice ({e}); keeping batch_size={configured_bs}')
+        selected_bs = configured_bs
+    finally:
+        del backbone, neck, bbox_head
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    # Synchronize selected_bs across local DDP ranks via shared temp file so all ranks use identical batch_size
+    if world_size > 1:
+        sync_tag = f"{os.environ.get('MASTER_PORT', '29500')}_{os.getppid()}"
+        tmp_dir = tempfile.gettempdir()
+        my_file = osp.join(tmp_dir, f'uavdet_bs_{sync_tag}_rank{local_rank}.txt')
+        try:
+            with open(my_file, 'w', encoding='utf-8') as f:
+                f.write(str(selected_bs))
+            rank_values = []
+            deadline = time.time() + 30.0
+            for r in range(min(world_size, num_devices)):
+                r_file = osp.join(tmp_dir, f'uavdet_bs_{sync_tag}_rank{r}.txt')
+                while not osp.exists(r_file) and time.time() < deadline:
+                    time.sleep(0.05)
+                if osp.exists(r_file):
+                    with open(r_file, 'r', encoding='utf-8') as rf:
+                        val_str = rf.read().strip()
+                        if val_str.isdigit():
+                            rank_values.append(int(val_str))
+            if rank_values:
+                selected_bs = min(rank_values)
+        except Exception:
+            pass
+
+    new_accum = max(1, int(math.ceil(target_effective_bs / float(selected_bs * world_size))))
+    cfg.train_dataloader.batch_size = selected_bs
+    if 'val_dataloader' in cfg and isinstance(cfg.val_dataloader, dict):
+        cfg.val_dataloader.batch_size = selected_bs
+    if 'test_dataloader' in cfg and isinstance(cfg.test_dataloader, dict):
+        cfg.test_dataloader.batch_size = selected_bs
+    cfg.optim_wrapper.accumulative_counts = new_accum
+
+    if local_rank == 0:
+        print(
+            f'[AutoBatchProbe] Selected batch_size={selected_bs} per GPU '
+            f'x {world_size} GPUs x accumulative_counts={new_accum} '
+            f'= {selected_bs * world_size * new_accum} effective batch size.\n'
+        )
+    return cfg
 
 
 def main():
@@ -131,17 +364,69 @@ def main():
         cfg.resume = True
         cfg.load_from = args.resume
 
-    # build the runner from config
-    if 'runner_type' not in cfg:
-        # build the default runner
-        runner = Runner.from_cfg(cfg)
-    else:
-        # build customized runner from the registry
-        # if 'runner_type' is set in the cfg
-        runner = RUNNERS.build(cfg)
+    # Automatic pre-training batch size VRAM probing
+    if not args.no_auto_bs:
+        cfg = auto_select_batch_size(cfg, use_amp=args.amp)
 
-    # start training
-    runner.train()
+    if args.probe_only:
+        print(
+            f'PROBE_RESULT:batch_size={cfg.train_dataloader.batch_size},'
+            f'accumulative_counts={cfg.optim_wrapper.get("accumulative_counts", 1)}'
+        )
+        return
+
+    # Build and run training with automatic OOM fallback
+    while True:
+        try:
+            if 'runner_type' not in cfg:
+                runner = Runner.from_cfg(cfg)
+            else:
+                runner = RUNNERS.build(cfg)
+
+            runner.train()
+            break
+        except RuntimeError as e:
+            if 'out of memory' not in str(e).lower():
+                raise
+            current_bs = int(cfg.train_dataloader.get('batch_size', 1))
+            current_accum = int(cfg.optim_wrapper.get('accumulative_counts', 1))
+            print(
+                f'\n[UAVDET_OOM_DETECTED] Caught CUDA OutOfMemoryError at '
+                f'batch_size={current_bs}, accumulative_counts={current_accum}.',
+                flush=True
+            )
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            if current_bs <= 1:
+                print('[UAVDET_OOM_DETECTED] batch_size is already 1; cannot reduce further.', flush=True)
+                raise
+
+            new_bs = max(1, current_bs // 2)
+            new_accum = current_accum * 2
+            # If running under multi-GPU torchrun, exit with code 88 so setup_uavdet_server.py
+            # can cleanly respawn all DDP workers with the reduced batch size.
+            if args.launcher != 'none' or int(os.environ.get('WORLD_SIZE', 1)) > 1:
+                print(
+                    f'[UAVDET_OOM_RETRY] Recommending respawn with '
+                    f'batch_size={new_bs}, accumulative_counts={new_accum}.',
+                    flush=True
+                )
+                sys.exit(88)
+
+            print(
+                f'[UAVDET_OOM_RETRY] Automatically reducing batch_size: '
+                f'{current_bs} -> {new_bs}, accumulative_counts: {current_accum} -> {new_accum} '
+                f'and retrying training...',
+                flush=True
+            )
+            cfg.train_dataloader.batch_size = new_bs
+            if 'val_dataloader' in cfg and isinstance(cfg.val_dataloader, dict):
+                cfg.val_dataloader.batch_size = new_bs
+            if 'test_dataloader' in cfg and isinstance(cfg.test_dataloader, dict):
+                cfg.test_dataloader.batch_size = new_bs
+            cfg.optim_wrapper.accumulative_counts = new_accum
 
 
 if __name__ == '__main__':

@@ -1,13 +1,15 @@
 # Copyright (c) OpenMMLab and alex-yimingyang/UAVDet contributors.
 import os
 import os.path as osp
+import time
+from typing import Optional, Sequence
+
 import cv2
-import numpy as np
-import torch
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from typing import Sequence, Optional
+import numpy as np
+import torch
 
 from mmengine.hooks import Hook
 from mmdet.registry import HOOKS
@@ -16,45 +18,51 @@ from mmdet.structures.bbox import bbox_overlaps
 
 @HOOKS.register_module()
 class PeriodicBatchVisualizationHook(Hook):
-    """Periodic 10-Image Validation Batch Visualization Hook.
+    """Periodic Validation Output & 5-Panel Diagnostic Visualization Hook.
 
-    Triggers every ~100 training iterations to run inference on a 10-image validation batch
-    and saves composite 5-panel diagnostics:
-        Panel 1: Ground Truth (GT bounding boxes & categories)
-        Panel 2: LoG Prior (Laplacian of Gaussian high-frequency structural edge heatmap)
-        Panel 3: Predictions (Predicted boxes, labels & confidence scores)
-        Panel 4: IoU Error Map:
-                 - Green: Correct overlaps (IoU >= threshold and correct class)
-                 - Yellow: Wrongly classified or false positive predictions
-                 - Red: Missed ground truth targets (false negatives)
-        Panel 5: Mamba Adaptive Path Taken Route:
-                 - Spatial boundary gate heatmap showing where Mamba flushed memory along object boundaries
-                 - Overlaid scanning traversal vectors
-
-    Saves files as:
-        {imageID}_iter{Iter}_epoch{epoch}_score{score}.png
+    Triggers at early warmup milestones (`warmup_iters=(1, 2, 5, 10, 20)`) and then
+    every `interval=50` training iterations (`50, 100, 150, ...`) to:
+      1. Run validation inference on `num_samples` images from `val_dataloader`.
+      2. Print live validation metrics (GT count, predicted boxes, confidence scores,
+         TP/FP/FN, Precision, Recall, Mean IoU, and V1 module activations: LoGPrior,
+         BoundaryGate, and DensityHead) directly to the training log/console.
+      3. Save 5-panel diagnostic images:
+         - Panel 1: Ground Truth (GT bounding boxes & categories)
+         - Panel 2: LoG Prior (Laplacian of Gaussian structural edge heatmap)
+         - Panel 3: Predictions (Predicted boxes, labels & confidence scores)
+         - Panel 4: IoU Error Map (Green: TP, Yellow: FP, Red: Missed GT/FN)
+         - Panel 5: Mamba Adaptive Path Route (Boundary gate heatmap + scan vectors)
     """
 
     def __init__(
         self,
-        interval: int = 100,
+        interval: int = 50,
+        warmup_iters: Sequence[int] = (1, 2, 5, 10, 20),
         num_samples: int = 10,
         score_thr: float = 0.3,
         iou_thr: float = 0.5,
         out_dir: str = 'visualizations'
     ):
-        self.interval = interval
-        self.num_samples = num_samples
-        self.score_thr = score_thr
-        self.iou_thr = iou_thr
+        self.interval = int(interval)
+        self.warmup_iters = set(int(i) for i in warmup_iters) if warmup_iters is not None else set()
+        self.num_samples = int(num_samples)
+        self.score_thr = float(score_thr)
+        self.iou_thr = float(iou_thr)
         self.out_dir = out_dir
+
+    def _should_trigger(self, current_iter: int) -> bool:
+        if current_iter in self.warmup_iters:
+            return True
+        if self.interval > 0 and (current_iter % self.interval == 0):
+            return True
+        return False
 
     def after_train_iter(self, runner, batch_idx: int, data_batch=None, outputs=None) -> None:
         current_iter = runner.iter + 1
-        if current_iter % self.interval != 0:
+        if not self._should_trigger(current_iter):
             return
 
-        # In multi-GPU DDP training, only rank 0 saves visualizations
+        # In multi-GPU DDP training, only rank 0 runs the lightweight validation check and saves visualizations
         if hasattr(runner, 'rank') and runner.rank != 0:
             return
 
@@ -68,12 +76,29 @@ class PeriodicBatchVisualizationHook(Hook):
                 runner.logger.warning(f"PeriodicBatchVisualizationHook safely skipped iteration {current_iter}: {e}")
 
     def _visualize(self, runner, current_iter: int) -> None:
+        t0 = time.time()
         save_dir = osp.join(runner.work_dir, self.out_dir)
         os.makedirs(save_dir, exist_ok=True)
 
         model = runner.model
         was_training = model.training
         model.eval()
+
+        total_gt = 0
+        total_pred_thr = 0
+        total_pred_low = 0
+        total_tp = 0
+        total_fp = 0
+        total_fn = 0
+        matched_ious = []
+        all_top_scores = []
+        max_conf = 0.0
+
+        log_mean_vals = []
+        log_max_vals = []
+        gate_s_means = []
+        dens_means = []
+        dens_maxs = []
 
         try:
             val_dataloader = runner.val_loop.dataloader
@@ -90,6 +115,21 @@ class PeriodicBatchVisualizationHook(Hook):
                         detector = model
 
                     predictions = detector.val_step(val_batch)
+
+                    # Collect V1 module health stats from this validation batch
+                    if hasattr(detector, 'backbone'):
+                        log_t = getattr(detector.backbone, 'last_log_prior', None)
+                        if log_t is not None and log_t.numel() > 0:
+                            log_mean_vals.append(float(log_t.float().mean().item()))
+                            log_max_vals.append(float(log_t.float().max().item()))
+                        s_list = getattr(detector.backbone, 'last_boundary_strengths', None)
+                        if s_list:
+                            gate_s_means.append(float(s_list[0].float().mean().item()))
+                    if hasattr(detector, 'bbox_head'):
+                        d_list = getattr(detector.bbox_head, 'last_density_maps', None)
+                        if d_list:
+                            dens_means.append(float(d_list[0].float().mean().item()))
+                            dens_maxs.append(float(d_list[0].float().max().item()))
 
                     batch_inputs = val_batch['inputs']
                     batch_samples = val_batch['data_samples']
@@ -124,7 +164,6 @@ class PeriodicBatchVisualizationHook(Hook):
                         # If gt_bboxes were scaled to input tensor size (e.g. 640x640), rescale to (w, h)
                         if len(gt_bboxes) > 0 and hasattr(data_sample, 'scale_factor') and data_sample.scale_factor is not None:
                             sf = data_sample.scale_factor
-                            # Check if max gt coord is within padded shape and smaller than original shape
                             if (w > 700 or h > 700) and gt_bboxes[:, [0, 2]].max() <= 645 and gt_bboxes[:, [1, 3]].max() <= 645:
                                 gt_bboxes[:, [0, 2]] /= float(sf[0])
                                 gt_bboxes[:, [1, 3]] /= float(sf[1])
@@ -135,10 +174,30 @@ class PeriodicBatchVisualizationHook(Hook):
                         pred_scores = pred_instances.scores.cpu().numpy() if len(pred_instances.scores) > 0 else np.zeros((0,))
                         pred_labels = pred_instances.labels.cpu().numpy() if len(pred_instances.labels) > 0 else np.zeros((0,))
 
-                        keep = pred_scores >= self.score_thr
-                        filt_bboxes = pred_bboxes[keep]
-                        filt_scores = pred_scores[keep]
-                        filt_labels = pred_labels[keep]
+                        if len(pred_scores) > 0:
+                            max_conf = max(max_conf, float(pred_scores.max()))
+                            top_k = pred_scores[:min(20, len(pred_scores))]
+                            all_top_scores.extend(top_k.tolist())
+
+                        keep_thr = pred_scores >= self.score_thr
+                        keep_low = pred_scores >= 0.05
+                        total_gt += len(gt_bboxes)
+                        total_pred_thr += int(keep_thr.sum())
+                        total_pred_low += int(keep_low.sum())
+
+                        # If no boxes exceed score_thr in very early iterations (e.g. iter 1, 2, 5),
+                        # display top-15 boxes with score >= 0.05 so visual progress is immediately visible
+                        if int(keep_thr.sum()) > 0:
+                            filt_bboxes = pred_bboxes[keep_thr]
+                            filt_scores = pred_scores[keep_thr]
+                            filt_labels = pred_labels[keep_thr]
+                            used_fallback = False
+                        else:
+                            top_n = min(15, int(keep_low.sum()))
+                            filt_bboxes = pred_bboxes[:top_n]
+                            filt_scores = pred_scores[:top_n]
+                            filt_labels = pred_labels[:top_n]
+                            used_fallback = True
 
                         mean_score = float(filt_scores.mean()) if len(filt_scores) > 0 else 0.0
 
@@ -157,7 +216,6 @@ class PeriodicBatchVisualizationHook(Hook):
                             log_batch = detector.backbone.last_log_prior
                             b_idx = min(b, log_batch.shape[0] - 1)
                             log_tensor = log_batch[b_idx, 0].cpu().numpy()
-                            # Crop out padding if img_shape is available
                             if hasattr(data_sample, 'img_shape') and data_sample.img_shape is not None:
                                 ih, iw = data_sample.img_shape[:2]
                                 log_tensor = log_tensor[:ih, :iw]
@@ -185,13 +243,21 @@ class PeriodicBatchVisualizationHook(Hook):
                         matched_pred = set()
 
                         if len(gt_bboxes) > 0 and len(filt_bboxes) > 0:
-                            ious = bbox_overlaps(torch.tensor(filt_bboxes, dtype=torch.float32), torch.tensor(gt_bboxes, dtype=torch.float32)).numpy()
+                            ious = bbox_overlaps(
+                                torch.tensor(filt_bboxes, dtype=torch.float32),
+                                torch.tensor(gt_bboxes, dtype=torch.float32)
+                            ).numpy()
                             for p_idx in range(len(filt_bboxes)):
                                 best_gt_idx = int(np.argmax(ious[p_idx]))
-                                max_iou = ious[p_idx, best_gt_idx]
+                                max_iou = float(ious[p_idx, best_gt_idx])
                                 if max_iou >= self.iou_thr and filt_labels[p_idx] == gt_labels[best_gt_idx]:
                                     matched_pred.add(p_idx)
                                     matched_gt.add(best_gt_idx)
+                                    matched_ious.append(max_iou)
+
+                        total_tp += len(matched_pred)
+                        total_fp += max(0, len(filt_bboxes) - len(matched_pred))
+                        total_fn += max(0, len(gt_bboxes) - len(matched_gt))
 
                         for p_idx in matched_pred:
                             x1, y1, x2, y2 = map(int, filt_bboxes[p_idx])
@@ -230,10 +296,17 @@ class PeriodicBatchVisualizationHook(Hook):
                         # Combine into 5-panel figure
                         # -----------------------------------------------------------------
                         fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+                        pred_title = (
+                            f"Predictions ({len(filt_bboxes)} >= {self.score_thr:.2f})"
+                            if not used_fallback
+                            else f"Top-{len(filt_bboxes)} Preds (max={filt_scores.max():.2f})"
+                            if len(filt_scores) > 0
+                            else "Predictions (0 bboxes)"
+                        )
                         panels = [
                             (p1_img, f"Ground Truth ({len(gt_bboxes)} objs)"),
                             (p2_img, "LoG Structural Prior"),
-                            (p3_img, f"Predictions ({len(filt_bboxes)} bboxes)"),
+                            (p3_img, pred_title),
                             (p4_img, "IoU Error Map (Green:TP, Yellow:FP, Red:FN)"),
                             (p5_img, "Mamba Adaptive Path Route")
                         ]
@@ -245,12 +318,46 @@ class PeriodicBatchVisualizationHook(Hook):
 
                         plt.tight_layout()
 
-                        filename = f"{img_id}_iter{current_iter}_epoch{runner.epoch}_score{mean_score:.2f}.png"
+                        filename = f"{img_id}_iter{current_iter}_epoch{runner.epoch + 1}_score{mean_score:.2f}.png"
                         out_path = osp.join(save_dir, filename)
                         plt.savefig(out_path, dpi=120, bbox_inches='tight')
                         plt.close(fig)
 
                         vis_count += 1
+
+            # Compute summary validation metrics and log to console
+            elapsed = time.time() - t0
+            mean_top_conf = float(np.mean(all_top_scores)) if all_top_scores else 0.0
+            precision = (total_tp / float(total_tp + total_fp)) * 100.0 if (total_tp + total_fp) > 0 else 0.0
+            recall = (total_tp / float(total_gt)) * 100.0 if total_gt > 0 else 0.0
+            mean_iou = float(np.mean(matched_ious)) if matched_ious else 0.0
+
+            log_m = float(np.mean(log_mean_vals)) if log_mean_vals else 0.0
+            log_x = float(np.max(log_max_vals)) if log_max_vals else 0.0
+            s_m = float(np.mean(gate_s_means)) if gate_s_means else 0.0
+            g_m = float(np.exp(-s_m))
+            d_m = float(np.mean(dens_means)) if dens_means else 0.0
+            d_x = float(np.max(dens_maxs)) if dens_maxs else 0.0
+
+            summary_msg = (
+                f"\n{'='*78}\n"
+                f"[Validation Output @ Iter {current_iter} (Epoch {runner.epoch + 1})] "
+                f"Evaluated {vis_count} val images in {elapsed:.2f}s\n"
+                f"  Detections : GT Objects={total_gt} | Preds(>={self.score_thr:.2f})={total_pred_thr} | "
+                f"Preds(>=0.05)={total_pred_low}\n"
+                f"  Confidence : max={max_conf:.4f} | mean(top-20/img)={mean_top_conf:.4f}\n"
+                f"  Val Metrics: TP={total_tp}, FP={total_fp}, FN={total_fn} | "
+                f"Precision={precision:.1f}%, Recall={recall:.1f}%, MeanIoU={mean_iou:.3f}\n"
+                f"  V1 Modules : LoG(mean={log_m:.3f}, max={log_x:.3f}) | "
+                f"BoundaryGate(s={s_m:.4f}, g={g_m:.4f}) | Density(mean={d_m:.3f}, max={d_x:.3f})\n"
+                f"  Saved PNGs : {save_dir}/*_iter{current_iter}_*.png\n"
+                f"{'='*78}"
+            )
+            if hasattr(runner, 'logger') and runner.logger is not None:
+                runner.logger.info(summary_msg)
+            else:
+                print(summary_msg, flush=True)
+
         finally:
             if was_training:
                 model.train()

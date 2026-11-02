@@ -130,7 +130,7 @@ test_evaluator = dict(
     outfile_prefix='./work_dirs/visdrone_detection/uavdet_a6000')
 
 # ==============================================================================
-# Custom Periodic Visualization Hook
+# Custom Periodic Visualization Hook (triggers at iter 1, 2, 5, 10, 20, then every 50 iters)
 # ==============================================================================
 custom_hooks = [
     dict(
@@ -140,8 +140,13 @@ custom_hooks = [
         update_buffers=True,
         priority=49),
     dict(
+        type='PipelineSwitchHook',
+        switch_epoch=180,
+        switch_pipeline='{{_base_.train_pipeline_stage2}}'),
+    dict(
         type='PeriodicBatchVisualizationHook',
-        interval=100,
+        interval=50,
+        warmup_iters=(1, 2, 5, 10, 20),
         num_samples=10,
         score_thr=0.3,
         iou_thr=0.5,
@@ -160,8 +165,8 @@ default_hooks = dict(
 
 log_processor = dict(type='LogProcessor', window_size=1, by_epoch=True)
 
-# DDP configuration
-find_unused_parameters = True
-model_wrapper_cfg = dict(type='MMDistributedDataParallel', find_unused_parameters=True)
+# DDP configuration (all parameters participate in forward/backward; False avoids redundant graph traversal)
+find_unused_parameters = False
+model_wrapper_cfg = dict(type='MMDistributedDataParallel', find_unused_parameters=False)
 
 work_dir = './work_dirs/uavdet_a6000_2gpu_visdrone'
