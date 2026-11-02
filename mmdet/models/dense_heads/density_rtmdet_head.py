@@ -149,23 +149,28 @@ class DensityRTMDetSepBNHead(RTMDetSepBNHead):
         total_gts = sum(len(inst.bboxes) for inst in batch_gt_instances)
         normalizer = max(float(total_gts), 1.0)
 
+        # Pre-extract GT boxes onto CPU once to avoid thousands of per-box CUDA .item() syncs
+        gt_boxes_cpu = [
+            inst.bboxes.detach().cpu() if len(inst.bboxes) > 0 else None
+            for inst in batch_gt_instances
+        ]
+
         for lvl, (stride, logit) in enumerate(zip(self.prior_generator.strides, dens_logits)):
             B, _, H, W = logit.shape
-            target_heatmaps = logit.new_zeros((B, 1, H, W))
+            # Build target heatmap on CPU to avoid thousands of tiny CUDA slice kernel launches, then move to device once
+            target_heatmaps_cpu = torch.zeros((B, 1, H, W), dtype=torch.float32)
             stride_val = float(stride[0]) if isinstance(stride, (list, tuple)) else float(stride)
 
             for img_idx in range(num_imgs):
-                gt_bboxes = batch_gt_instances[img_idx].bboxes
-                if len(gt_bboxes) == 0:
+                gt_bboxes = gt_boxes_cpu[img_idx]
+                if gt_bboxes is None:
                     continue
 
                 scaled_boxes = gt_bboxes / stride_val
-                wh = scaled_boxes[:, 2:4] - scaled_boxes[:, 0:2]
-                centers = (scaled_boxes[:, 0:2] + scaled_boxes[:, 2:4]) * 0.5
+                wh = (scaled_boxes[:, 2:4] - scaled_boxes[:, 0:2]).tolist()
+                centers = ((scaled_boxes[:, 0:2] + scaled_boxes[:, 2:4]) * 0.5).tolist()
 
-                for i in range(len(wh)):
-                    w, h = float(wh[i, 0].item()), float(wh[i, 1].item())
-                    cx, cy = float(centers[i, 0].item()), float(centers[i, 1].item())
+                for (w, h), (cx, cy) in zip(wh, centers):
                     if w <= 0 or h <= 0:
                         continue
                     ctx_int = int(round(cx))
@@ -176,11 +181,12 @@ class DensityRTMDetSepBNHead(RTMDetSepBNHead):
                         gaussian_radius((math.ceil(h), math.ceil(w)), min_overlap=self.min_overlap),
                         self.min_gaussian_radius
                     )
-                    gen_gaussian_target(target_heatmaps[img_idx, 0], [ctx_int, cty_int], int(r))
+                    gen_gaussian_target(target_heatmaps_cpu[img_idx, 0], [ctx_int, cty_int], int(r))
 
+            target_heatmaps = target_heatmaps_cpu.to(device=logit.device, non_blocking=True)
             # GaussianFocalLoss expects sigmoid probabilities in (0, 1); clamp to avoid log(0) in fp16
             pred_density = logit.float().sigmoid().clamp(min=1e-4, max=1.0 - 1e-4)
-            dens_loss = self.density_loss_fn(pred_density, target_heatmaps.float(), avg_factor=normalizer)
+            dens_loss = self.density_loss_fn(pred_density, target_heatmaps, avg_factor=normalizer)
             dens_losses.append(dens_loss)
 
         losses['loss_density'] = sum(dens_losses) / max(len(dens_losses), 1)
