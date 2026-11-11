@@ -142,7 +142,23 @@ custom_hooks = [
     dict(
         type='PipelineSwitchHook',
         switch_epoch=180,
-        switch_pipeline='{{_base_.train_pipeline_stage2}}'),
+        switch_pipeline=[
+            dict(backend_args=None, type='LoadImageFromFile'),
+            dict(type='LoadAnnotations', with_bbox=True),
+            dict(
+                keep_ratio=True,
+                ratio_range=(0.1, 2.0),
+                scale=(640, 640),
+                type='RandomResize'),
+            dict(crop_size=(640, 640), type='RandomCrop'),
+            dict(type='YOLOXHSVRandomAug'),
+            dict(prob=0.5, type='RandomFlip'),
+            dict(
+                pad_val=dict(img=(114, 114, 114)),
+                size=(640, 640),
+                type='Pad'),
+            dict(type='PackDetInputs'),
+        ]),
     dict(
         type='PeriodicBatchVisualizationHook',
         interval=50,

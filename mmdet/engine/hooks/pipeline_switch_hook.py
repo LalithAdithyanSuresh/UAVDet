@@ -26,10 +26,23 @@ class PipelineSwitchHook(Hook):
         train_loader = runner.train_dataloader
         if epoch >= self.switch_epoch and not self._has_switched:
             runner.logger.info('Switch pipeline now!')
+            pipeline_cfg = self.switch_pipeline
+            if isinstance(pipeline_cfg, str):
+                # Fallback if string template '{{_base_.train_pipeline_stage2}}' was not expanded
+                pipeline_cfg = getattr(runner.cfg, 'train_pipeline_stage2', [
+                    dict(backend_args=None, type='LoadImageFromFile'),
+                    dict(type='LoadAnnotations', with_bbox=True),
+                    dict(keep_ratio=True, ratio_range=(0.1, 2.0), scale=(640, 640), type='RandomResize'),
+                    dict(crop_size=(640, 640), type='RandomCrop'),
+                    dict(type='YOLOXHSVRandomAug'),
+                    dict(prob=0.5, type='RandomFlip'),
+                    dict(pad_val=dict(img=(114, 114, 114)), size=(640, 640), type='Pad'),
+                    dict(type='PackDetInputs'),
+                ])
             # The dataset pipeline cannot be updated when persistent_workers
             # is True, so we need to force the dataloader's multi-process
             # restart. This is a very hacky approach.
-            train_loader.dataset.pipeline = Compose(self.switch_pipeline)
+            train_loader.dataset.pipeline = Compose(pipeline_cfg)
             if hasattr(train_loader, 'persistent_workers'
                        ) and train_loader.persistent_workers is True:
                 train_loader._DataLoader__initialized = False
