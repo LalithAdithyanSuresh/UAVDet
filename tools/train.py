@@ -122,6 +122,19 @@ try:
 except Exception:
     pass
 
+# PyTorch 2.6+ compatibility: mmengine checkpoints store HistoryBuffer, numpy scalars,
+# and optimizer/scheduler state dicts that require weights_only=False when resuming.
+_orig_torch_load = torch.load
+
+
+def _compat_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs or kwargs['weights_only'] is None:
+        kwargs['weights_only'] = False
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _compat_torch_load
+
 from mmengine.config import Config, DictAction
 from mmengine.registry import MODELS, RUNNERS
 from mmengine.runner import Runner

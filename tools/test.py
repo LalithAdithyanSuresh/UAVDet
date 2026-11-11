@@ -5,9 +5,22 @@ import os.path as osp
 import warnings
 from copy import deepcopy
 
+import torch
 from mmengine import ConfigDict
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
+
+# PyTorch 2.6+ compatibility for mmengine checkpoints
+_orig_torch_load = torch.load
+
+
+def _compat_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs or kwargs['weights_only'] is None:
+        kwargs['weights_only'] = False
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _compat_torch_load
 
 from mmdet.engine.hooks.utils import trigger_visualization_hook
 from mmdet.evaluation import DumpDetResults
