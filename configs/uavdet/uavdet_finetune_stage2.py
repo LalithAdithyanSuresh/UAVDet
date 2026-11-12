@@ -56,8 +56,8 @@ train_pipeline_stage2 = [
 
 train_dataloader = dict(
     batch_size=8,
-    num_workers=4,
-    persistent_workers=True,
+    num_workers=0,
+    persistent_workers=False,
     pin_memory=True,
     dataset=dict(
         pipeline=train_pipeline_stage2
