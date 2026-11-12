@@ -10,7 +10,7 @@ from .utils import trigger_visualization_hook
 from .visualization_hook import (DetVisualizationHook,
                                  GroundingVisualizationHook,
                                  TrackVisualizationHook)
-from .boundary_vis_hook import PeriodicBatchVisualizationHook
+from .boundary_vis_hook import PeriodicBatchVisualizationHook, DynamicLoggerHook
 from .yolox_mode_switch_hook import YOLOXModeSwitchHook
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     'SetEpochInfoHook', 'MemoryProfilerHook', 'DetVisualizationHook',
     'NumClassCheckHook', 'MeanTeacherHook', 'trigger_visualization_hook',
     'PipelineSwitchHook', 'TrackVisualizationHook',
-    'GroundingVisualizationHook', 'PeriodicBatchVisualizationHook'
+    'GroundingVisualizationHook', 'PeriodicBatchVisualizationHook',
+    'DynamicLoggerHook'
 ]
 

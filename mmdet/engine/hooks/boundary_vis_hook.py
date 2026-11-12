@@ -8,9 +8,40 @@ import cv2
 import numpy as np
 import torch
 
-from mmengine.hooks import Hook
+from mmengine.hooks import Hook, LoggerHook
 from mmdet.registry import HOOKS
 from mmdet.structures.bbox import bbox_overlaps
+
+
+@HOOKS.register_module()
+class DynamicLoggerHook(LoggerHook):
+    """Dynamic LoggerHook that starts frequently and progressively widens interval:
+    e.g. iter 1 -> every 1, iter 5 -> every 5, iter 10 -> every 10, iter 20 -> every 20,
+    iter 50+ -> every 50 iterations.
+    Eliminates GPU-CPU synchronization stalls during regular training iterations.
+    """
+
+    def __init__(
+        self,
+        interval: int = 50,
+        milestones: Sequence[Tuple[int, int]] = ((1, 1), (5, 5), (10, 10), (20, 20), (50, 50)),
+        **kwargs
+    ):
+        super().__init__(interval=interval, **kwargs)
+        self.milestones = sorted(milestones, key=lambda x: x[0])
+        self.default_interval = interval
+
+    def _get_current_interval(self, current_iter: int) -> int:
+        cur_interval = self.default_interval
+        for milestone_iter, inter in reversed(self.milestones):
+            if current_iter >= milestone_iter:
+                return inter
+        return cur_interval
+
+    def after_train_iter(self, runner, batch_idx: int, data_batch=None, outputs=None) -> None:
+        current_iter = runner.iter + 1
+        self.interval = self._get_current_interval(current_iter)
+        super().after_train_iter(runner, batch_idx, data_batch, outputs)
 
 
 def _crop_and_normalize_map(

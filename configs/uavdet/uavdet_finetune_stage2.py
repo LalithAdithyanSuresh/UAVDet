@@ -56,8 +56,8 @@ train_pipeline_stage2 = [
 
 train_dataloader = dict(
     batch_size=8,
-    num_workers=0,
-    persistent_workers=False,
+    num_workers=4,
+    persistent_workers=True,
     pin_memory=True,
     dataset=dict(
         pipeline=train_pipeline_stage2
@@ -116,7 +116,7 @@ train_cfg = dict(
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
-# 6. Custom Hooks: EMA + Periodic Visualizer (No PipelineSwitchHook needed since Stage 2 is active throughout)
+# 6. Custom Hooks: EMA + Periodic Visualizer (Evaluates 10 sample val images every 100 iters)
 custom_hooks = [
     dict(
         type='EMAHook',
@@ -127,7 +127,7 @@ custom_hooks = [
     dict(
         type='PeriodicBatchVisualizationHook',
         interval=100,
-        warmup_iters=(1, 5, 10, 20),
+        warmup_iters=None,
         num_samples=10,
         score_thr=0.3,
         iou_thr=0.5,
@@ -135,10 +135,14 @@ custom_hooks = [
         priority=51)
 ]
 
-# 7. Checkpointing: Save every epoch, preserve best model automatically
+# 7. Checkpointing & Dynamic Logger (starts at 1, widens to 5, 10, 20, 50 to eliminate GPU sync stalls)
 default_hooks = dict(
     timer=dict(type='IterTimerHook'),
-    logger=dict(type='LoggerHook', interval=1),
+    logger=dict(
+        type='DynamicLoggerHook',
+        interval=50,
+        milestones=((1, 1), (5, 5), (10, 10), (20, 20), (50, 50))
+    ),
     param_scheduler=dict(type='ParamSchedulerHook'),
     checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=5, save_best='auto', save_last=True),
     sampler_seed=dict(type='DistSamplerSeedHook'),
