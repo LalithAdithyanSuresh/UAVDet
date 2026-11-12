@@ -236,17 +236,20 @@ Table~\ref{tab:gap_motivation} details how each identified research gap directly
 % CHAPTER 3: DATASET AND SIMULATION DETAILS
 % (Marks: Dataset & System Architecture: 10)
 % =========================================================
-\chapter{Dataset and Experimental Setup}
+\chapter{Dataset Details}
+% which ever is suitable for your project
 
-\section{Dataset Description and Relevance}
-The system is evaluated on the \textbf{VisDrone2019-DET} benchmark~\cite{zhu2021visdrone}, the preeminent gold-standard for UAV aerial surveillance. Captured across 14 diverse cities in China by drone platforms operating under varied illumination (daylight, dusk, night streetlights) and altitudes, the dataset comprises \textbf{10,209 high-resolution images} divided into:
+\section{Dataset Environment}
+The evaluation of the object detection models is conducted primarily on the large-scale aerial benchmark: the \textbf{VisDrone2019-DET} dataset~\cite{zhu2021visdrone,du2019visdrone}, with cross-domain validation on the \textbf{DOTA-v1.0} benchmark~\cite{xia2018dota,ding2021dota}. These benchmarks were selected because they embody the core physical challenges of real-world UAV surveillance: extreme altitude variation (50m to 150m), severe visual perspective distortion, and heavy background clutter. In this project, the primary objective is detecting highly dense object clusters and camouflaged, tiny targets that naturally blend into asphalt, shadows, and urban ground noise.
+
+\section{Dataset Description}
+The VisDrone2019-DET dataset comprises images captured by drone-mounted cameras across 14 diverse cities in China under various weather and lighting conditions. It features:
 \begin{itemize}[leftmargin=2em]
     \item \textbf{Train Set:} 6,471 images containing 342,391 annotated bounding boxes.
     \item \textbf{Validation Set:} 548 images (used for hyperparameter calibration and periodic evaluation).
-    \item \textbf{Test-Dev Set:} 1,610 images (official SOTA benchmarking benchmark).
+    \item \textbf{Test-Dev Set:} 1,610 images (official SOTA benchmarking split).
 \end{itemize}
-
-The dataset encompasses 10 distinct vehicle and pedestrian categories: \texttt{pedestrian}, \texttt{people}, \texttt{bicycle}, \texttt{car}, \texttt{van}, \texttt{truck}, \texttt{tricycle}, \texttt{awning-tricycle}, \texttt{bus}, and \texttt{motor}. Additionally, cross-domain robustness is verified on the \textbf{DOTA-v1.0} aerial dataset~\cite{xia2018dota} spanning 2,806 high-altitude remote sensing images.
+The dataset features 10 target categories: \texttt{pedestrian}, \texttt{people}, \texttt{bicycle}, \texttt{car}, \texttt{van}, \texttt{truck}, \texttt{tricycle}, \texttt{awning-tricycle}, \texttt{bus}, and \texttt{motor}. Additionally, DOTA-v1.0~\cite{xia2018dota} contains 2,806 high-resolution aerial images spanning 15 categories, used to verify high-altitude generalization.
 
 \begin{figure}[htbp]
     \centering
@@ -259,15 +262,16 @@ The dataset encompasses 10 distinct vehicle and pedestrian categories: \texttt{p
     \label{fig:visdrone_vis}
 \end{figure}
 
-\section{Data Preprocessing and Augmentation Pipeline}
+\section{Data Collection and Preprocessing}
 Due to the variable resolutions of drone imagery (up to $2000 \times 1500$ pixels), a disciplined two-stage augmentation pipeline is applied:
 \begin{enumerate}[leftmargin=2em]
-    \item \textbf{Stage-1 Robust Training (Epochs 1--180):} Employs \textbf{CachedMosaic} and \textbf{CachedMixUp} with ratio range $(0.1, 2.0)$ and random crop size $640 \times 640$, simulating ultra-dense crowds and forcing the network to localize targets across varied visual contexts. Color jitter (YOLOXHSVRandomAug) and RandomFlip ($\text{prob}=0.5$) prevent overfitting.
+    \item \textbf{Image Tiling and Normalization:} Images are standardized to $640 \times 640$ resolution using aspect-ratio-preserving padding (pad value 114) and normalized with standard color statistics ($\mu = [103.53, 116.28, 123.675]$, $\sigma = [57.375, 57.12, 58.395]$).
+    \item \textbf{Spatio-Frequency Extraction:} Analytical Laplacian of Gaussian (LoG) kernels ($\sigma \in \{1.5, 3.0, 6.0\}$) are extracted directly from the raw floating-point channels to decouple structural physical boundaries from low-frequency background texture prior to convolutional downsampling.
+    \item \textbf{Stage-1 Robust Training (Epochs 1--180):} Employs \textbf{CachedMosaic} and \textbf{CachedMixUp} with ratio range $(0.1, 2.0)$ and random crop size $640 \times 640$, simulating ultra-dense crowds. Color jitter (YOLOXHSVRandomAug) and RandomFlip ($\text{prob}=0.5$) prevent overfitting.
     \item \textbf{Stage-2 Clean Geometry Fine-Tuning (Epochs 181--200+):} Disables Mosaic and MixUp completely. The network trains strictly on un-collaged natural scene geometry using RandomResize and Pad to $640 \times 640$. This eliminates artificial border discontinuities, allowing the bounding-box regression heads to hone precise edge alignments.
-    \item \textbf{Analytical LoG Normalization:} Raw images are normalized using ImageNet channel statistics ($\mu = [103.53, 116.28, 123.675]$, $\sigma = [57.375, 57.12, 58.395]$), while the analytical LoG prior is computed on un-normalized floating-point color channels.
 \end{enumerate}
 
-\section{Dataset Characteristics and Statistics}
+\section{Dataset Characteristics}
 Statistical breakdown reveals that **60.5\%** of all target instances are small ($<32 \times 32\text{ px}$), with over 18\% measuring under $12 \times 12$ pixels (Figure~\ref{fig:dataset_stats_report}(a)). Furthermore, over **45\%** of instances across all categories experience moderate-to-severe occlusion (Figure~\ref{fig:dataset_stats_report}(b)).
 
 \begin{figure}[htbp]
@@ -281,13 +285,26 @@ Statistical breakdown reveals that **60.5\%** of all target instances are small 
     \label{fig:dataset_stats_report}
 \end{figure}
 
+\section{Assumptions and Limitations}
+While preparing the datasets for model evaluation, several constraints and assumptions were acknowledged:
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Optical Clarity Assumption:} The primary datasets assume relatively clear optical visibility. While varying illumination is present, extreme atmospheric degradations (such as dense fog, blinding sandstorms, or complete zero-lux darkness) are underrepresented.
+    \item \textbf{Annotation Noise in Dense Clusters:} In ultra-dense scenes (e.g., congested plazas and bumper-to-bumper traffic jams), human annotation naturally introduces marginal localization noise or missed labels for highly occluded sub-16-pixel targets, setting a theoretical ceiling on supervised training precision.
+    \item \textbf{Hardware Constraints:} On-board edge inference requires standardized batch tiling. Resizing high-resolution $4K$ aerial frames down to $640 \times 640$ without tiling risks losing solitary tiny targets.
+\end{enumerate}
+
 % =========================================================
 % CHAPTER 4: SYSTEM MODEL AND ARCHITECTURE
 % (Marks: System Architecture: Part of 10)
 % =========================================================
-\chapter{System Model and Proposed Architecture}
+\chapter{System Model}
 
-\section{Overall System Architecture}
+\section{System Overview}
+Aerial surveillance platforms frequently encounter severe visual ambiguity stemming from two intertwined perceptual challenges: \textbf{target camouflage} and \textbf{extreme multi-scale variance}. In real-world drone imagery, ground objects (such as light gray vehicles on faded concrete, dark trucks under canopy shadows, or camouflaged containers on textured dirt) exhibit near-zero spectral contrast against their surrounding terrain in RGB color space ($|\Delta I_{\text{RGB}}| \to 0$). Standard convolutional detectors and uniform Vision State-Space Models (Mamba)~\cite{gu2023mamba,liu2024vmamba} struggle because color alone cannot distinguish real engineered objects from visual clutter, and standard continuous 1D scanning dilutes weak features across vast background expanses.
+
+To overcome these foundational roadblocks, the proposed system introduces a unified four-module framework operating at linear computational complexity $\mathcal{O}(N)$ with only 4.39 million parameters.
+
+\section{System Architecture}
 Figure~\ref{fig:system_arch} illustrates the complete end-to-end architecture of \textbf{UAVDet V1}. Operating as a unified, single-stage anchor-free detector, the framework comprises four interconnected components:
 \begin{enumerate}[leftmargin=2em]
     \item \textbf{Analytical LoG Opponent-Color Stem Prior (Module 1):} Extracts high-frequency scale-space physical contours directly from the raw RGB input.
@@ -305,14 +322,14 @@ Figure~\ref{fig:system_arch} illustrates the complete end-to-end architecture of
     \label{fig:system_arch}
 \end{figure}
 
-\section{Module 1: Analytical Tri-Scale LoG Physics Prior}
+\subsection{Module 1: Analytical Tri-Scale LoG Physics Prior}
 To break target camouflage where RGB pixel contrast vanishes ($|\Delta I_{\text{RGB}}| \to 0$), the model incorporates an analytical Laplacian of Gaussian operator across three octaves ($\sigma \in \{1.5, 3.0, 6.0\}$). Given an image channel $I(x, y)$, the 2D LoG kernel is formulated as:
 \begin{equation}
     \nabla^2_{\text{norm}} G(x, y; \sigma) = \sigma^2 \left( \frac{x^2 + y^2 - 2\sigma^2}{\sigma^4} \right) \frac{1}{2\pi\sigma^2} \exp\left(-\frac{x^2 + y^2}{2\sigma^2}\right)
 \end{equation}
 The kernels are pre-computed analytically, normalized such that $\sum K = 0$, and initialized as frozen convolutional weights inside the stem. Because high-frequency physical material boundaries produce invariant zero-crossings regardless of shadows or paint camouflage, the resulting prior map $M_{\text{LoG}} \in \mathbb{R}^{1 \times H \times W}$ supplies an unambiguous structural cue that guides initial feature extraction.
 
-\section{Module 2: Boundary-Aware Cross-Stage Backbone (BACSPUAV)}
+\subsection{Module 2: Boundary-Aware Cross-Stage Backbone (BACSPUAV)}
 Standard Vision Mamba flattens 2D features into 1D sequences $x_1, \dots, x_T$ and applies continuous linear state-space recurrence:
 \begin{equation}
     h_t = \mathbf{\bar{A}}_t h_{t-1} + \mathbf{\bar{B}}_t x_t, \quad y_t = \mathbf{\bar{C}}_t h_t + \mathbf{\bar{D}}_t x_t
@@ -323,15 +340,15 @@ where $\mathbf{\bar{A}}_t = \exp(\Delta_t \mathbf{A})$. To prevent vast expanses
 \end{equation}
 When the scan trajectory crosses a sharp object-to-background transition ($s_t \gg 0$), $g_t \to 0$, driving $\mathbf{\bar{A}}'_t \to \mathbf{I}$ (or resetting $h_t \to 0$). This dynamically isolates foreground targets from background clutter while preserving exact parallel scan associativity ($\mathcal{O}(N)$ complexity).
 
-\section{Module 3: CSPMBFPN with Coarse-to-Fine Scale Sequence Scan}
-Standard FPNs propagate features only between adjacent levels ($P_i \leftrightarrow P_{i+1}$), failing to establish continuity between high-level semantics ($P_4$) and ultra-fine small-object features ($P_1$, stride 4). Our \textbf{CSPMBFPN} arranges multi-scale feature maps into a ordered scale-sequence:
+\subsection{Module 3: CSPMBFPN with Coarse-to-Fine Scale Sequence Scan}
+Standard FPNs propagate features only between adjacent levels ($P_i \leftrightarrow P_{i+1}$), failing to establish continuity between high-level semantics ($P_4$) and ultra-fine small-object features ($P_1$, stride 4). Our \textbf{CSPMBFPN} arranges multi-scale feature maps into an ordered scale-sequence:
 \begin{equation}
     \mathcal{S} = [S_4(P_4), S_3(P_3), S_2(P_2), S_1(P_1)]
 \end{equation}
 and processes the concatenated sequence via a Scale-Axis State-Space Scan. This continuous coarse-to-fine propagation injects strong semantic context directly into stride-4 feature maps without spatial resolution loss.
 
-\section{Module 4: Density-Guided Head with Anisotropic Box Targets}
-The detection head predicts class probabilities $P_{\text{cls}}$, bounding-box distance vectors $D_{\text{reg}} = (l, t, r, b)$, and spatial density logits $M_{\text{dens}}$. Features are residuals modulated:
+\subsection{Module 4: Density-Guided Head with Anisotropic Box Targets}
+The detection head predicts class probabilities $P_{\text{cls}}$, bounding-box distance vectors $D_{\text{reg}} = (l, t, r, b)$, and spatial density logits $M_{\text{dens}}$. Features are residual-modulated:
 \begin{equation}
     F'_i = F_i \cdot \big(1 + \gamma_i \cdot \sigma(M_{\text{dens}, i})\big)
 \end{equation}
@@ -342,6 +359,15 @@ To resolve the medium/large object degradation caused by single-pixel CenterNet 
     G(x, y) = \exp\left( - \frac{(x - c_x)^2}{2 \sigma_x^2} - \frac{(y - c_y)^2}{2 \sigma_y^2} \right)
 \end{equation}
 where $\sigma_x = \max((2r_x + 1)/4.0, 0.75)$ and $\sigma_y = \max((2r_y + 1)/4.0, 0.75)$. This guarantees that all 13 positive anchor locations selected by RTMDet's dynamic label assigner receive strong, smooth foreground supervision ($>0.15$), restoring high-IoU localization on vehicles. During test inference, density multiplication is decoupled (`use_density_at_test=False`), preventing accidental suppression of camouflaged objects.
+
+\section{System Workflow}
+The operational pipeline proceeds through four disciplined execution stages:
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Image Ingestion and LoG Decomposition:} The airborne frame $I \in \mathbb{R}^{3 \times H \times W}$ is split into an RGB path and an analytical LoG filter bank. The resulting pre-attentive edge map is fused into the stem to suppress sensor noise.
+    \item \textbf{Hierarchical Boundary-Gated State-Space Extraction:} The fused tokens propagate through the BACSPUAV stages (strides 4, 8, 16, 32). Boundary gates evaluate terrain transitions, ensuring state resets across background-to-object frontiers.
+    \item \textbf{Cross-Scale Sequence Alignment:} Pyramid stages are flattened into an inter-scale sequence and processed by the scale-axis scan in CSPMBFPN, propagating high-level semantic context down to high-resolution stride-4 maps.
+    \item \textbf{Anchor-Free Prediction and Dynamic Assignment:} Decoupled heads evaluate classification with Quality Focal Loss and regression with GIoU loss under dynamic soft label assignment. Non-maximum suppression (NMS) yields the final bounding box outputs.
+\end{enumerate}
 
 % =========================================================
 % CHAPTER 5: FEASIBILITY STUDY
@@ -536,3 +562,4 @@ Table~\ref{tab:timeline} delineates the detailed schedule, completion status, an
 \end{thebibliography}
 
 \end{document}
+
