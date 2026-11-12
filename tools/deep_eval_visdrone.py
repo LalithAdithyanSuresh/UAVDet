@@ -369,19 +369,24 @@ def compute_detailed_coco_metrics(ann_file, results_pkl, dataset):
         return float(np.mean(valid) * 100.0) if valid.size > 0 else 0.0
 
     global_metrics = {
-        "AP": _mean_valid(prec[:, :, :, 0, 2]),       # IoU=0.50:0.95, area=all, maxDets=500
-        "AP_100": _mean_valid(prec[:, :, :, 0, 1]),   # IoU=0.50:0.95, area=all, maxDets=100
-        "AP50": _mean_valid(prec[0, :, :, 0, 2]),     # IoU=0.50, area=all, maxDets=500
-        "AP75": _mean_valid(prec[5, :, :, 0, 2]),     # IoU=0.75, area=all, maxDets=500
-        "AP_s": _mean_valid(prec[:, :, :, 1, 2]),     # area=small, maxDets=500
-        "AP_m": _mean_valid(prec[:, :, :, 2, 2]),     # area=medium, maxDets=500
-        "AP_l": _mean_valid(prec[:, :, :, 3, 2]),     # area=large, maxDets=500
-        "AR_10": _mean_valid(rec[:, :, 0, 0]),        # maxDets=10
-        "AR_100": _mean_valid(rec[:, :, 0, 1]),       # maxDets=100
-        "AR_500": _mean_valid(rec[:, :, 0, 2]),       # maxDets=500
-        "AR_s": _mean_valid(rec[:, :, 1, 2]),         # area=small, maxDets=500
-        "AR_m": _mean_valid(rec[:, :, 2, 2]),         # area=medium, maxDets=500
-        "AR_l": _mean_valid(rec[:, :, 3, 2]),         # area=large, maxDets=500
+        "AP": _mean_valid(prec[:, :, :, 0, 2]),         # IoU=0.50:0.95, area=all, maxDets=500
+        "AP_100": _mean_valid(prec[:, :, :, 0, 1]),     # IoU=0.50:0.95, area=all, maxDets=100
+        "AP50": _mean_valid(prec[0, :, :, 0, 2]),       # IoU=0.50, area=all, maxDets=500
+        "AP50_100": _mean_valid(prec[0, :, :, 0, 1]),   # IoU=0.50, area=all, maxDets=100
+        "AP75": _mean_valid(prec[5, :, :, 0, 2]),       # IoU=0.75, area=all, maxDets=500
+        "AP75_100": _mean_valid(prec[5, :, :, 0, 1]),   # IoU=0.75, area=all, maxDets=100
+        "AP_s": _mean_valid(prec[:, :, :, 1, 2]),       # area=small, maxDets=500
+        "AP_s_100": _mean_valid(prec[:, :, :, 1, 1]),   # area=small, maxDets=100
+        "AP_m": _mean_valid(prec[:, :, :, 2, 2]),       # area=medium, maxDets=500
+        "AP_m_100": _mean_valid(prec[:, :, :, 2, 1]),   # area=medium, maxDets=100
+        "AP_l": _mean_valid(prec[:, :, :, 3, 2]),       # area=large, maxDets=500
+        "AP_l_100": _mean_valid(prec[:, :, :, 3, 1]),   # area=large, maxDets=100
+        "AR_10": _mean_valid(rec[:, :, 0, 0]),          # maxDets=10
+        "AR_100": _mean_valid(rec[:, :, 0, 1]),         # maxDets=100
+        "AR_500": _mean_valid(rec[:, :, 0, 2]),         # maxDets=500
+        "AR_s": _mean_valid(rec[:, :, 1, 2]),           # area=small, maxDets=500
+        "AR_m": _mean_valid(rec[:, :, 2, 2]),           # area=medium, maxDets=500
+        "AR_l": _mean_valid(rec[:, :, 3, 2]),           # area=large, maxDets=500
     }
 
     per_class_metrics = {}
@@ -556,18 +561,21 @@ def evaluate_split(
     ckpt_path,
     split,
     save_dir,
-    score_thr=0.12,
+    score_thr=0.30,
     tp_iou_thr=0.5,
     batch_size=8,
     data_dir=None,
     from_pkl=False,
     sqrt_scores=False,
+    no_density_mul=False,
 ):
     repo_dir = osp.abspath(osp.join(osp.dirname(__file__), ".."))
     _, ann_file = ensure_visdrone_split_ready(repo_dir, split=split, custom_data_dir=data_dir)
 
     os.makedirs(save_dir, exist_ok=True)
-    pkl_path = osp.join(save_dir, f"predictions_{split}.pkl")
+    suffix = "_nodensmul" if no_density_mul else ""
+    pkl_path = osp.join(save_dir, f"predictions_{split}{suffix}.pkl")
+    prev_pkl_path = osp.join(save_dir, f"predictions_{split}.pkl")
 
     cfg = Config.fromfile(cfg_path)
     init_default_scope(cfg.get("default_scope", "mmdet"))
@@ -575,6 +583,8 @@ def evaluate_split(
 
     cfg.load_from = ckpt_path
     cfg.work_dir = save_dir
+    if no_density_mul:
+        cfg.model.bbox_head.use_density_at_test = False
 
     split_img_prefix = "test2017/" if split == "test" else "val2017/"
     split_ann_rel = "annotations/instances_test2017.json" if split == "test" else "annotations/instances_val2017.json"
@@ -598,10 +608,12 @@ def evaluate_split(
     total_params = 4.39
     if not (from_pkl and osp.exists(pkl_path)):
         print("\n" + "=" * 80)
+        mode_str = "NO-DENSITY-MUL (use_density_at_test=False, pure p_cls)" if no_density_mul else "DEFAULT (use_density_at_test=True, p_cls * M_density)"
         print(f"[DeepEval] Running Inference & COCO Evaluation on VisDrone2019-{split.upper()}")
+        print(f"           Mode       : {mode_str}")
         print(f"           Checkpoint : {ckpt_path}")
         print(f"           Annotation : {ann_file}")
-        print(f"           Output Dir : {save_dir}")
+        print(f"           Output PKL : {pkl_path}")
         print("=" * 80 + "\n")
 
         runner = Runner.from_cfg(cfg)
@@ -626,8 +638,17 @@ def evaluate_split(
 
     global_m, class_m = compute_detailed_coco_metrics(ann_file, results, dataset)
 
-    # Sweep thresholds to show calibrated product-score operating point vs uncalibrated 0.30
-    sweep_thrs = sorted(set([0.10, 0.12, 0.15, 0.20, 0.30, round(float(score_thr), 3)]))
+    # Also load previous (with density mul) metrics if we are running --no-density-mul and prev_pkl_path exists
+    prev_global_m, prev_class_m, prev_norm_cm_030 = None, None, None
+    if no_density_mul and osp.exists(prev_pkl_path):
+        print(f"[DeepEval] Loading previous predictions ({prev_pkl_path}) for direct A/B comparison...")
+        prev_results = load(prev_pkl_path)
+        prev_global_m, prev_class_m = compute_detailed_coco_metrics(ann_file, prev_results, dataset)
+        prev_raw_cm_030 = calculate_confusion_matrix(dataset, prev_results, score_thr=0.30, tp_iou_thr=tp_iou_thr)
+        prev_norm_cm_030 = normalize_cm(prev_raw_cm_030)
+
+    # Sweep thresholds to show calibrated operating point vs 0.30
+    sweep_thrs = sorted(set([0.10, 0.12, 0.15, 0.20, 0.25, 0.30, round(float(score_thr), 3)]))
     sweep_summary = {}
     for st in sweep_thrs:
         rcm = calculate_confusion_matrix(dataset, results, score_thr=st, tp_iou_thr=tp_iou_thr)
@@ -643,32 +664,37 @@ def evaluate_split(
     norm_cm = sweep_summary[round(float(score_thr), 3)]["norm_cm"]
 
     labels_with_bg = list(VISDRONE_CLASSES) + ["background"]
-    cm_single_path = osp.join(save_dir, f"confusion_matrix_{split}.png")
-    cm_compare_path = osp.join(save_dir, f"confusion_matrix_{split}_vs_uavdet.png")
+    cm_single_path = osp.join(save_dir, f"confusion_matrix_{split}{suffix}.png")
+    cm_compare_path = osp.join(save_dir, f"confusion_matrix_{split}{suffix}_vs_uavdet.png")
 
     plot_uavdet_style_cm(
         norm_cm,
         labels_with_bg,
         cm_single_path,
-        title=f"Normalized Confusion Matrix ({split.upper()} Set, thr={score_thr:.2f})",
+        title=f"Normalized Confusion Matrix ({split.upper()} Set{suffix}, thr={score_thr:.2f})",
     )
     plot_side_by_side_cm(
         norm_cm,
         labels_with_bg,
         cm_compare_path,
-        split_name=f"VisDrone {split.upper()} (thr={score_thr:.2f})",
+        split_name=f"VisDrone {split.upper()}{suffix} (thr={score_thr:.2f})",
         ap_ours=global_m["AP_100"],
         ap50_ours=global_m["AP50"],
     )
 
     return {
         "split": split,
+        "suffix": suffix,
+        "no_density_mul": no_density_mul,
         "checkpoint": ckpt_path,
         "params_m": total_params,
         "score_thr": score_thr,
         "sweep_summary": sweep_summary,
         "global": global_m,
         "per_class": class_m,
+        "prev_global": prev_global_m,
+        "prev_per_class": prev_class_m,
+        "prev_norm_cm_030": prev_norm_cm_030,
         "raw_cm": raw_cm,
         "norm_cm": norm_cm,
         "cm_single_path": cm_single_path,
@@ -678,10 +704,14 @@ def evaluate_split(
 
 def generate_deep_analysis_report(eval_data, save_dir):
     split = eval_data["split"].upper()
+    suffix = eval_data.get("suffix", "")
+    no_density_mul = eval_data.get("no_density_mul", False)
     g = eval_data["global"]
     pc = eval_data["per_class"]
     norm_cm = eval_data["norm_cm"]
     params_m = eval_data["params_m"]
+    prev_g = eval_data.get("prev_global", None)
+    prev_cm_030 = eval_data.get("prev_norm_cm_030", None)
 
     # Note: pycocotools displays AP(maxDets=100) on the first line (`AP_100`) and AP(maxDets=500) as `AP`
     ap_main = g["AP_100"]
@@ -693,62 +723,93 @@ def generate_deep_analysis_report(eval_data, save_dir):
     ap_l = g["AP_l"]
     ar_500 = g["AR_500"]
 
+    mode_banner = "NO-DENSITY-MUL (use_density_at_test=False)" if no_density_mul else "DEFAULT (use_density_at_test=True)"
+
     lines = []
-    lines.append("=" * 88)
+    lines.append("=" * 92)
     lines.append(f"  UAVDET V1 DEEP EVALUATION & SOTA COMPARISON REPORT — VISDRONE2019-{split}")
-    lines.append("=" * 88)
+    lines.append(f"  Inference Mode: {mode_banner}")
+    lines.append("=" * 92)
     lines.append(f"Checkpoint Evaluated : {eval_data['checkpoint']}")
     lines.append(f"Model Parameters     : {params_m:.2f}M (vs. Base UAVDet 3.74M, RT-DETR 42.0M, ViTDet 110.0M)")
     lines.append(f"Confusion Matrix PNG : {eval_data['cm_single_path']}")
     lines.append(f"Side-by-Side CM PNG  : {eval_data['cm_compare_path']}")
-    lines.append("-" * 88)
+    lines.append("-" * 92)
+
+    if prev_g is not None:
+        curr_diag_030 = eval_data["sweep_summary"].get(0.30, {}).get("mean_diag_tp", 0.0)
+        prev_diag_030 = float(np.mean([prev_cm_030[i, i] for i in range(10)])) if prev_cm_030 is not None else 0.0
+        lines.append("\n0. DIRECT A/B COMPARISON: PREVIOUS (p_cls * M_density) VS. NEW (PURE p_cls, NO DENSITY MUL)")
+        lines.append("-" * 92)
+        lines.append(
+            f"{'Configuration':<34} | {'AP':>6} | {'AP50':>6} | {'AP75':>6} | {'AP_S':>6} | {'AP_M':>6} | {'AP_L':>6} | {'CM TP@0.3':>9}"
+        )
+        lines.append("-" * 92)
+        lines.append(
+            f"{'Previous (use_density_at_test=True)':<34} | {prev_g['AP_100']:>5.1f}% | {prev_g['AP50']:>5.1f}% | "
+            f"{prev_g['AP75']:>5.1f}% | {prev_g['AP_s']:>5.1f}% | {prev_g['AP_m']:>5.1f}% | {prev_g['AP_l']:>5.1f}% | {prev_diag_030:>8.1f}%"
+        )
+        lines.append(
+            f"{'New (--no-density-mul, pure p_cls)':<34} | {ap_main:>5.1f}% | {ap50:>5.1f}% | "
+            f"{ap75:>5.1f}% | {ap_s:>5.1f}% | {ap_m:>5.1f}% | {ap_l:>5.1f}% | {curr_diag_030:>8.1f}%"
+        )
+        lines.append(
+            f"{'Delta (New - Previous)':<34} | {ap_main - prev_g['AP_100']:>+5.1f}% | {ap50 - prev_g['AP50']:>+5.1f}% | "
+            f"{ap75 - prev_g['AP75']:>+5.1f}% | {ap_s - prev_g['AP_s']:>+5.1f}% | {ap_m - prev_g['AP_m']:>+5.1f}% | "
+            f"{ap_l - prev_g['AP_l']:>+5.1f}% | {curr_diag_030 - prev_diag_030:>+8.1f}%"
+        )
+        lines.append("-" * 92)
 
     lines.append("\n1. OVERALL BENCHMARK COMPARISON VS. UAVDET (TABLE 3) & SOTA DETECTORS")
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     lines.append(f"{'Method':<30} | {'AP':>6} | {'AP50':>6} | {'AP75':>6} | {'AP_S':>6} | {'AP_M':>6} | {'AP_L':>6} | {'Params':>8}")
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     for name, s_ap, s_ap50, s_ap75, s_aps, s_apm, s_apl, s_p in SOTA_TABLE_3:
         lines.append(
             f"{name:<30} | {s_ap:>5.1f}% | {s_ap50:>5.1f}% | {s_ap75:>5.1f}% | "
             f"{s_aps:>5.1f}% | {s_apm:>5.1f}% | {s_apl:>5.1f}% | {s_p:>6.2f}M"
         )
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     lines.append(
-        f"{f'Ours (UAVDet V1 on {split})':<30} | {ap_main:>5.1f}% | {ap50:>5.1f}% | {ap75:>5.1f}% | "
+        f"{f'Ours ({split}, maxDets=500)':<30} | {ap_main:>5.1f}% | {ap50:>5.1f}% | {ap75:>5.1f}% | "
         f"{ap_s:>5.1f}% | {ap_m:>5.1f}% | {ap_l:>5.1f}% | {params_m:>6.2f}M"
+    )
+    lines.append(
+        f"{f'Ours ({split}, maxDets=100)':<30} | {ap_main:>5.1f}% | {g['AP50_100']:>5.1f}% | {g['AP75_100']:>5.1f}% | "
+        f"{g['AP_s_100']:>5.1f}% | {g['AP_m_100']:>5.1f}% | {g['AP_l_100']:>5.1f}% | {params_m:>6.2f}M"
     )
     lines.append(
         f"{'Delta vs. Base UAVDet (Table 3)':<30} | {ap_main - 26.8:>+5.1f}% | {ap50 - 44.8:>+5.1f}% | {ap75 - 27.8:>+5.1f}% | "
         f"{ap_s - 15.3:>+5.1f}% | {ap_m - 38.3:>+5.1f}% | {ap_l - 54.9:>+5.1f}% | {params_m - 3.74:>+6.2f}M"
     )
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     lines.append(
         f"Additional Recall Metrics: AR@10 = {g['AR_10']:.1f}% | AR@100 = {g['AR_100']:.1f}% | "
         f"AR@500 = {ar_500:.1f}% | AR_S(Small) = {g['AR_s']:.1f}% | AR_M = {g['AR_m']:.1f}% | AR_L = {g['AR_l']:.1f}%"
     )
 
     lines.append("\n2. PER-CLASS DEEP BREAKDOWN (AP, AP50, AP75, AP_S, AP_M, AP_L)")
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     lines.append(f"{'Category':<18} | {'AP':>6} | {'AP50':>6} | {'AP75':>6} | {'AP_S':>6} | {'AP_M':>6} | {'AP_L':>6} | {'AR500':>6}")
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     for cls_name in VISDRONE_CLASSES:
         c = pc[cls_name]
         lines.append(
             f"{cls_name:<18} | {c['AP']:>5.1f}% | {c['AP50']:>5.1f}% | {c['AP75']:>5.1f}% | "
             f"{c['AP_s']:>5.1f}% | {c['AP_m']:>5.1f}% | {c['AP_l']:>5.1f}% | {c['AR_500']:>5.1f}%"
         )
-    lines.append("-" * 88)
+    lines.append("-" * 92)
 
-    score_thr_used = eval_data.get("score_thr", 0.12)
+    score_thr_used = eval_data.get("score_thr", 0.30)
     sweep_summary = eval_data.get("sweep_summary", {})
     if sweep_summary:
-        lines.append("\n3A. CONFUSION MATRIX OPERATING THRESHOLD CALIBRATION (PRODUCT SCORE p_cls * M_density)")
-        lines.append("-" * 88)
+        lines.append("\n3A. CONFUSION MATRIX OPERATING THRESHOLD SWEEP")
+        lines.append("-" * 92)
         lines.append(
-            f"{'Score Threshold':<18} | {'Equiv Single-Prob':>18} | {'Mean Diagonal TP':>18} | "
+            f"{'Score Threshold':<18} | {'Sqrt(Threshold)':>18} | {'Mean Diagonal TP':>18} | "
             f"{'Delta vs Base(39.7%)':>20} | {'Mean Missed(BG FN)':>18}"
         )
-        lines.append("-" * 88)
+        lines.append("-" * 92)
         for st, sinfo in sorted(sweep_summary.items()):
             eq_p = float(np.sqrt(st))
             mtp = sinfo["mean_diag_tp"]
@@ -757,15 +818,15 @@ def generate_deep_analysis_report(eval_data, save_dir):
             lines.append(
                 f"{st:<18.2f} | {eq_p:>17.2f}  | {mtp:>17.1f}% | {mtp - 39.7:>+19.1f}% | {mfn:>17.1f}%{marker}"
             )
-        lines.append("-" * 88)
+        lines.append("-" * 92)
 
     lines.append(f"\n3B. CONFUSION MATRIX ANALYSIS VS. BASE UAVDET (score_thr={score_thr_used:.2f}, IoU=0.50)")
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     lines.append(
         f"{'Category':<18} | {'Base Diag TP':>12} | {'Ours Diag TP':>12} | {'Delta TP':>9} | "
         f"{'Ours Missed(BG FN)':>18} | {'Top Inter-Class Confusion':<24}"
     )
-    lines.append("-" * 88)
+    lines.append("-" * 92)
 
     diag_base_list = []
     diag_ours_list = []
@@ -788,24 +849,26 @@ def generate_deep_analysis_report(eval_data, save_dir):
 
     mean_b_tp = float(np.mean(diag_base_list))
     mean_o_tp = float(np.mean(diag_ours_list))
-    lines.append("-" * 88)
+    lines.append("-" * 92)
     lines.append(
         f"{'Mean Diagonal TP':<18} | {mean_b_tp:>11.1f}% | {mean_o_tp:>11.1f}% | {mean_o_tp - mean_b_tp:>+8.1f}% |"
     )
-    lines.append("=" * 88)
+    lines.append("=" * 92)
 
     report_text = "\n".join(lines)
     print("\n" + report_text + "\n")
 
-    report_file = osp.join(save_dir, f"deep_analysis_{eval_data['split']}.txt")
+    report_file = osp.join(save_dir, f"deep_analysis_{eval_data['split']}{suffix}.txt")
     with open(report_file, "w", encoding="utf-8") as f:
         f.write(report_text + "\n")
 
-    json_file = osp.join(save_dir, f"deep_analysis_{eval_data['split']}.json")
+    json_file = osp.join(save_dir, f"deep_analysis_{eval_data['split']}{suffix}.json")
     with open(json_file, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "split": eval_data["split"],
+                "no_density_mul": no_density_mul,
+                "score_thr": score_thr_used,
                 "checkpoint": eval_data["checkpoint"],
                 "params_m": eval_data["params_m"],
                 "global_metrics": eval_data["global"],
@@ -850,8 +913,8 @@ def main():
     parser.add_argument(
         "--score-thr",
         type=float,
-        default=0.12,
-        help="Confidence threshold for confusion matrix (default: 0.12 for product score p_cls * M_density, equiv to ~0.35 single prob)",
+        default=None,
+        help="Confidence threshold for confusion matrix (defaults to 0.30 with --no-density-mul, or 0.12 for product score)",
     )
     parser.add_argument(
         "--tp-iou-thr",
@@ -875,7 +938,15 @@ def main():
         action="store_true",
         help="Calibrate product scores via geometric mean sqrt(p_cls * M_density) so score_thr=0.30 matches single-probability scale",
     )
+    parser.add_argument(
+        "--no-density-mul",
+        action="store_true",
+        help="Disable test-time score_factors multiplication (use_density_at_test=False) so scores = pure p_cls while keeping feature modulation active",
+    )
     args = parser.parse_args()
+
+    if args.score_thr is None:
+        args.score_thr = 0.30 if (args.no_density_mul or args.sqrt_scores) else 0.12
 
     ckpt_path = find_best_checkpoint(args.work_dir, args.checkpoint)
     out_root = osp.join(args.work_dir, "deep_evaluation")
@@ -895,6 +966,7 @@ def main():
             data_dir=args.data_dir,
             from_pkl=args.from_pkl,
             sqrt_scores=args.sqrt_scores,
+            no_density_mul=args.no_density_mul,
         )
         generate_deep_analysis_report(eval_data, sp_dir)
 
