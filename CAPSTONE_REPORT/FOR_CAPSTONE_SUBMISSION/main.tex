@@ -272,7 +272,7 @@ Due to the variable resolutions of drone imagery (up to $2000 \times 1500$ pixel
 \end{enumerate}
 
 \section{Dataset Characteristics}
-Statistical breakdown reveals that **60.5\%** of all target instances are small ($<32 \times 32\text{ px}$), with over 18\% measuring under $12 \times 12$ pixels (Figure~\ref{fig:dataset_stats_report}(a)). Furthermore, over **45\%** of instances across all categories experience moderate-to-severe occlusion (Figure~\ref{fig:dataset_stats_report}(b)).
+Statistical breakdown reveals that \textbf{60.5\%} of all target instances are small ($<32 \times 32\text{ px}$), with over 18\% measuring under $12 \times 12$ pixels (Figure~\ref{fig:dataset_stats_report}(a)). Furthermore, over \textbf{45\%} of instances across all categories experience moderate-to-severe occlusion (Figure~\ref{fig:dataset_stats_report}(b)).
 
 \begin{figure}[htbp]
     \centering
@@ -382,6 +382,7 @@ The proposed detector is implemented entirely within PyTorch and the standard Op
 \centering
 \caption{Model Complexity, Parameter Footprint, and Computational Efficiency Comparison.}
 \label{tab:complexity_comparison}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcccc}
 \toprule
 \textbf{Model} & \textbf{Parameters (M)} & \textbf{GFLOPs (640$\times$640)} & \textbf{Inference (FPS)} & \textbf{Edge Deployable}\\
@@ -393,10 +394,11 @@ Base UAVDet~\cite{yang2026uavdet} & 7.10 & 26.4 & 38.0 & Yes\\
 \midrule
 \textbf{Our UAVDet V1} & \textbf{4.39} & \textbf{16.8} & \textbf{52.6} & \textbf{Yes (Jetson Orin)}\\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}
 
-With only **4.39M parameters** and **16.8 GFLOPs**, UAVDet V1 achieves a 38\% reduction in model parameters and a 36\% reduction in FLOPs compared to Base UAVDet, confirming exceptional suitability for memory-constrained drone flight controllers.
+With only 4.39M parameters and 16.8 GFLOPs, UAVDet V1 achieves a 38\% reduction in model parameters and a 36\% reduction in FLOPs compared to Base UAVDet, confirming exceptional suitability for memory-constrained drone flight controllers.
 
 \section{Hardware and Infrastructure Feasibility}
 Training and evaluation were conducted on an enterprise server equipped with:
@@ -405,7 +407,7 @@ Training and evaluation were conducted on an enterprise server equipped with:
     \item \textbf{Memory \& Storage:} 128 GB System RAM, high-speed NVMe PCIe 4.0 SSD caching VisDrone2019.
     \item \textbf{Parallelism:} PyTorch DistributedDataParallel (DDP) utilizing NCCL backend with native AMP (`float16`) mixed precision and dynamic gradient scaling.
 \end{itemize}
-Edge deployment feasibility was benchmarked using TensorRT FP16 quantization on an NVIDIA Jetson AGX Orin module, yielding a sustained inference latency of **19.0 ms per frame (52.6 FPS)** at $640 \times 640$ resolution.
+Edge deployment feasibility was benchmarked using TensorRT FP16 quantization on an NVIDIA Jetson AGX Orin module, yielding a sustained inference latency of \textbf{19.0 ms per frame (52.6 FPS)} at $640 \times 640$ resolution.
 
 \section{Operational and Economic Feasibility}
 The entire training pipeline is built on 100\% open-source scientific software (PyTorch, MMDetection, MMEngine, OpenCV) with zero proprietary licensing costs. Furthermore, because UAVDet eliminates the need for expensive multi-camera array hardware or high-wattage airborne server nodes, standard commercial drones (e.g., DJI Matrice 300 / Holybro Pixhawk suites) can run real-time inference using low-power edge SBCs, establishing complete economic viability.
@@ -448,7 +450,7 @@ Base UAVDet~\cite{yang2026uavdet} & 7.10 & 26.8 & 44.8 & 27.4 & 15.2 & 38.4 & 54
 }
 \end{table}
 
-As shown in Table~\ref{tab:sota_results}, the completed 200-epoch checkpoint achieves **25.7\% AP** and **43.9\% $\text{AP}_{50}$** with only 4.39M parameters. Stage-2 fine-tuning with anisotropic bounding-box targets and quadrupled update cadence ($\text{accumulative\_counts}=1$) projects a final accuracy of **27.6\% AP** and **46.5\% $\text{AP}_{50}$**, decisively surpassing Base UAVDet (+0.8\% AP, +1.7\% $\text{AP}_{50}$) while requiring 38\% fewer parameters.
+As shown in Table~\ref{tab:sota_results}, the completed 200-epoch checkpoint achieves \textbf{25.7\% AP} and \textbf{43.9\% $\text{AP}_{50}$} with only 4.39M parameters. Stage-2 fine-tuning with anisotropic bounding-box targets and quadrupled update cadence ($\text{accumulative\_counts}=1$) projects a final accuracy of \textbf{27.6\% AP} and \textbf{46.5\% $\text{AP}_{50}$}, decisively surpassing Base UAVDet (+0.8\% AP, +1.7\% $\text{AP}_{50}$) while requiring 38\% fewer parameters.
 
 \section{Scorecards and Diagnostic Progression}
 Figures~\ref{fig:scorecard_val} and~\ref{fig:scorecard_test} display the structured model performance scorecards across both the validation and test datasets.
@@ -485,8 +487,8 @@ Figure~\ref{fig:conf_matrix_comp} provides a side-by-side comparison of the norm
 
 Decoupling raw density prediction at test time resolved background ghost suppression:
 \begin{itemize}[leftmargin=2em]
-    \item \textbf{Mean Diagonal TP:} Jumped from 25.9\% to **38.9\%** (+13.0\% absolute improvement).
-    \item \textbf{Class Win over Base UAVDet:} Outperforms Base UAVDet on \texttt{van} (**36.1\%** vs.\ 35.0\%) and \texttt{bus} (**51.1\%** vs.\ 51.0\%).
+    \item \textbf{Mean Diagonal TP:} Jumped from 25.9\% to \textbf{38.9\%} (+13.0\% absolute improvement).
+    \item \textbf{Class Win over Base UAVDet:} Outperforms Base UAVDet on \texttt{van} (\textbf{36.1\%} vs.\ 35.0\%) and \texttt{bus} (\textbf{51.1\%} vs.\ 51.0\%).
     \item \textbf{Inter-Class Confusion:} \texttt{pedestrian} $\to$ \texttt{people} confusion dropped to 14.2\%, and \texttt{bicycle} $\to$ \texttt{motor} confusion dropped to 8.4\%.
 \end{itemize}
 
