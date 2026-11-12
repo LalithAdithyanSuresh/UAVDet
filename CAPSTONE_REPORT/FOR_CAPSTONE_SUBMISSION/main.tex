@@ -99,7 +99,7 @@ Unmanned Aerial Vehicles (UAVs) underpin traffic surveillance, search and rescue
 
 This project presents \textbf{UAVDet-V1}, a lightweight, physics-grounded detector with 4.39 million parameters, built on four components: (1) a tri-scale \textbf{Laplacian-of-Gaussian opponent-color prior} that separates structural boundaries from clutter and sensor noise; (2) a \textbf{Boundary-Aware Cross-Stage Partial backbone (BACSPUAV)} with Boundary-Gated Mamba blocks giving linear-time $\mathcal{O}(N)$ global context; (3) a \textbf{CSPMBFPN} feature pyramid with a coarse-to-fine scale-sequence scan; and (4) a \textbf{density-guided RTMDet head} with anisotropic box targets, which spread supervision across the full shape of elongated objects such as pedestrians and tricycles.
 
-The model was trained and evaluated on \textbf{VisDrone2019-DET} (6,471 training, 548 validation and 1,610 test-dev images, 10 categories). After 200 epochs of distributed training on two NVIDIA RTX A6000 GPUs, it reached 25.7\% AP and 43.9\% $\text{AP}_{50}$ on the test set and 29.4\% AP on the validation set. A Stage-2 fine-tuning run with anisotropic density targets and per-step weight updates has so far raised validation AP to 31.0\% ($\text{AP}_{50}$ 51.1\%) after two epochs, with the largest gains on small and medium objects (+1.4 and +2.5 AP). Based on the validation-to-test gap observed for the baseline, the completed fine-tuning is projected to reach about 27.6\% AP and 46.5\% $\text{AP}_{50}$ on the test set, compared with 26.8\% AP for the published Base UAVDet; this figure will be replaced by the measured test result once training finishes.
+The model was trained and evaluated on \textbf{VisDrone2019-DET} (6,471 training, 548 validation and 1,610 test-dev images, 10 categories). After 200 epochs of distributed training on two NVIDIA RTX GPUs, it reached 25.7\% AP and 43.9\% $\text{AP}_{50}$ on the test set and 29.4\% AP on the validation set. A Stage-2 fine-tuning run with anisotropic density targets and per-step weight updates has so far raised validation AP to 31.0\% ($\text{AP}_{50}$ 51.1\%) after two epochs, with the largest gains on small and medium objects (+1.4 and +2.5 AP). Based on the validation-to-test gap observed for the baseline, the completed fine-tuning is projected to reach about 27.6\% AP and 46.5\% $\text{AP}_{50}$ on the test set, compared with 26.8\% AP for the published Base UAVDet; this figure will be replaced by the measured test result once training finishes.
 
 Remaining work focuses on the hardest thin and small classes, namely tricycle, awning-tricycle, bicycle and pedestrian, through class-balanced sampling, elongated-object-aware losses and targeted error analysis. These classes matter most for traffic and crowd-safety applications, where missing a pedestrian or tricycle is costlier than missing a car, so the Phase 2 plan targets measurable per-class gains rather than overall AP alone.
 
@@ -142,7 +142,7 @@ The primary aim of this Capstone project is to develop, implement, and validate 
 
 \section{Scope and Assumptions}
 \begin{itemize}[leftmargin=2em]
-    \item \textbf{Scope:} The scope of Phase 1 covers theoretical derivation, mathematical proof of the parallel $\Delta$-decomposition scan, architectural implementation in PyTorch/MMDetection, full 200-epoch baseline training on dual RTX A6000 GPUs, diagnostic error analysis, and 50-epoch Stage-2 fine-tuning configuration.
+    \item \textbf{Scope:} The scope of Phase 1 covers theoretical derivation, mathematical proof of the parallel $\Delta$-decomposition scan, architectural implementation in PyTorch/MMDetection, full 200-epoch baseline training on dual RTX GPUs, diagnostic error analysis, and 50-epoch Stage-2 fine-tuning configuration.
     \item \textbf{Assumptions:} 
     \begin{enumerate}
         \item Optical sensor data is provided in standard RGB format at resolutions up to $1920 \times 1080$ or tiled $640 \times 640$ windows.
@@ -401,7 +401,7 @@ Base UAVDet~\cite{yang2026uavdet} & 3.74 & 46.63 & 53 & Yes\\
 \section{Hardware and Infrastructure Feasibility}
 Training and evaluation were conducted on an enterprise server equipped with:
 \begin{itemize}[leftmargin=2em]
-    \item \textbf{Compute:} 2$\times$ NVIDIA RTX A6000 GPUs (48 GB GDDR6 VRAM per card, Ampere architecture).
+    \item \textbf{Compute:} 2$\times$ NVIDIA RTX GPUs.
     \item \textbf{Memory \& Storage:} 128 GB System RAM, high-speed NVMe PCIe 4.0 SSD caching VisDrone2019.
     \item \textbf{Parallelism:} PyTorch DistributedDataParallel (DDP) utilizing NCCL backend with native AMP (\texttt{float16}) mixed precision and dynamic gradient scaling.
 \end{itemize}
@@ -518,7 +518,7 @@ Table~\ref{tab:timeline} delineates the detailed schedule, completion status, an
 \midrule
 \textbf{Phase 1: Milestone 2} & LoG stem prior derivation; Boundary-Gated Mamba ($\Delta$-decomposition) formulation. & Sep 2026 & Oct 2026 & \textbf{Completed:} Unit-tested PyTorch layer implementation.\\
 \midrule
-\textbf{Phase 1: Milestone 3} & Full 200-epoch distributed DDP training on 2$\times$ RTX A6000 GPUs. & Oct 2026 & Nov 2026 & \textbf{Completed:} Checkpoint \texttt{epoch\_200.pth} (4.39M params, 29.4\% val AP).\\
+\textbf{Phase 1: Milestone 3} & Full 200-epoch distributed DDP training on 2$\times$ RTX GPUs. & Oct 2026 & Nov 2026 & \textbf{Completed:} Checkpoint \texttt{epoch\_200.pth} (4.39M params, 29.4\% val AP).\\
 \midrule
 \textbf{Phase 1: Final Review} & Diagnostic evaluation, confusion matrix analysis, Stage-2 fine-tuning with anisotropic density targets. & Nov 2026 & Nov 2026 & \textbf{In progress:} Phase 1 Report \& Presentation (31.0\% val AP after 2 epochs; 27.6\% test AP projected).\\
 \midrule
