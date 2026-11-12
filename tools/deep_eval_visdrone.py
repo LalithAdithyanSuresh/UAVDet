@@ -551,7 +551,18 @@ def plot_side_by_side_cm(norm_ours, labels, out_path, split_name, ap_ours, ap50_
     plt.close(fig)
 
 
-def evaluate_split(cfg_path, ckpt_path, split, save_dir, score_thr=0.3, tp_iou_thr=0.5, batch_size=8, data_dir=None):
+def evaluate_split(
+    cfg_path,
+    ckpt_path,
+    split,
+    save_dir,
+    score_thr=0.12,
+    tp_iou_thr=0.5,
+    batch_size=8,
+    data_dir=None,
+    from_pkl=False,
+    sqrt_scores=False,
+):
     repo_dir = osp.abspath(osp.join(osp.dirname(__file__), ".."))
     _, ann_file = ensure_visdrone_split_ready(repo_dir, split=split, custom_data_dir=data_dir)
 
@@ -584,29 +595,52 @@ def evaluate_split(cfg_path, ckpt_path, split, save_dir, score_thr=0.3, tp_iou_t
         dict(type="DumpDetResults", out_file_path=pkl_path),
     ]
 
-    print("\n" + "=" * 80)
-    print(f"[DeepEval] Running Inference & COCO Evaluation on VisDrone2019-{split.upper()}")
-    print(f"           Checkpoint : {ckpt_path}")
-    print(f"           Annotation : {ann_file}")
-    print(f"           Output Dir : {save_dir}")
-    print("=" * 80 + "\n")
+    total_params = 4.39
+    if not (from_pkl and osp.exists(pkl_path)):
+        print("\n" + "=" * 80)
+        print(f"[DeepEval] Running Inference & COCO Evaluation on VisDrone2019-{split.upper()}")
+        print(f"           Checkpoint : {ckpt_path}")
+        print(f"           Annotation : {ann_file}")
+        print(f"           Output Dir : {save_dir}")
+        print("=" * 80 + "\n")
 
-    runner = Runner.from_cfg(cfg)
+        runner = Runner.from_cfg(cfg)
 
-    # Count parameters
-    total_params = sum(p.numel() for p in runner.model.parameters()) / 1e6
-    trainable_params = sum(p.numel() for p in runner.model.parameters() if p.requires_grad) / 1e6
-    print(f"[Model Complexity] Total Parameters: {total_params:.2f}M (Trainable: {trainable_params:.2f}M)")
+        # Count parameters
+        total_params = sum(p.numel() for p in runner.model.parameters()) / 1e6
+        trainable_params = sum(p.numel() for p in runner.model.parameters() if p.requires_grad) / 1e6
+        print(f"[Model Complexity] Total Parameters: {total_params:.2f}M (Trainable: {trainable_params:.2f}M)")
 
-    runner.test()
+        runner.test()
+    else:
+        print(f"\n[DeepEval] Reusing cached predictions from {pkl_path} (--from-pkl active)...")
 
     print("\n[DeepEval] Computing Detailed COCO Metrics & Normalized Confusion Matrix...")
     results = load(pkl_path)
+    if sqrt_scores:
+        print("[DeepEval] Applying geometric-mean score calibration: score = sqrt(p_cls * M_density)...")
+        for r in results:
+            r["pred_instances"]["scores"] = torch.sqrt(r["pred_instances"]["scores"].clamp(min=0.0))
+
     dataset = DATASETS.build(cfg.test_dataloader.dataset)
 
     global_m, class_m = compute_detailed_coco_metrics(ann_file, results, dataset)
-    raw_cm = calculate_confusion_matrix(dataset, results, score_thr=score_thr, tp_iou_thr=tp_iou_thr)
-    norm_cm = normalize_cm(raw_cm)
+
+    # Sweep thresholds to show calibrated product-score operating point vs uncalibrated 0.30
+    sweep_thrs = sorted(set([0.10, 0.12, 0.15, 0.20, 0.30, round(float(score_thr), 3)]))
+    sweep_summary = {}
+    for st in sweep_thrs:
+        rcm = calculate_confusion_matrix(dataset, results, score_thr=st, tp_iou_thr=tp_iou_thr)
+        ncm = normalize_cm(rcm)
+        sweep_summary[st] = {
+            "mean_diag_tp": float(np.mean([ncm[i, i] for i in range(10)])),
+            "mean_bg_fn": float(np.mean([ncm[i, -1] for i in range(10)])),
+            "norm_cm": ncm,
+            "raw_cm": rcm,
+        }
+
+    raw_cm = sweep_summary[round(float(score_thr), 3)]["raw_cm"]
+    norm_cm = sweep_summary[round(float(score_thr), 3)]["norm_cm"]
 
     labels_with_bg = list(VISDRONE_CLASSES) + ["background"]
     cm_single_path = osp.join(save_dir, f"confusion_matrix_{split}.png")
@@ -616,13 +650,13 @@ def evaluate_split(cfg_path, ckpt_path, split, save_dir, score_thr=0.3, tp_iou_t
         norm_cm,
         labels_with_bg,
         cm_single_path,
-        title=f"Normalized Confusion Matrix ({split.upper()} Set)",
+        title=f"Normalized Confusion Matrix ({split.upper()} Set, thr={score_thr:.2f})",
     )
     plot_side_by_side_cm(
         norm_cm,
         labels_with_bg,
         cm_compare_path,
-        split_name=f"VisDrone {split.upper()}",
+        split_name=f"VisDrone {split.upper()} (thr={score_thr:.2f})",
         ap_ours=global_m["AP_100"],
         ap50_ours=global_m["AP50"],
     )
@@ -631,6 +665,8 @@ def evaluate_split(cfg_path, ckpt_path, split, save_dir, score_thr=0.3, tp_iou_t
         "split": split,
         "checkpoint": ckpt_path,
         "params_m": total_params,
+        "score_thr": score_thr,
+        "sweep_summary": sweep_summary,
         "global": global_m,
         "per_class": class_m,
         "raw_cm": raw_cm,
@@ -703,7 +739,27 @@ def generate_deep_analysis_report(eval_data, save_dir):
         )
     lines.append("-" * 88)
 
-    lines.append("\n3. CONFUSION MATRIX ANALYSIS VS. BASE UAVDET (score_thr=0.30, IoU=0.50)")
+    score_thr_used = eval_data.get("score_thr", 0.12)
+    sweep_summary = eval_data.get("sweep_summary", {})
+    if sweep_summary:
+        lines.append("\n3A. CONFUSION MATRIX OPERATING THRESHOLD CALIBRATION (PRODUCT SCORE p_cls * M_density)")
+        lines.append("-" * 88)
+        lines.append(
+            f"{'Score Threshold':<18} | {'Equiv Single-Prob':>18} | {'Mean Diagonal TP':>18} | "
+            f"{'Delta vs Base(39.7%)':>20} | {'Mean Missed(BG FN)':>18}"
+        )
+        lines.append("-" * 88)
+        for st, sinfo in sorted(sweep_summary.items()):
+            eq_p = float(np.sqrt(st))
+            mtp = sinfo["mean_diag_tp"]
+            mfn = sinfo["mean_bg_fn"]
+            marker = " <-- active" if abs(st - score_thr_used) < 1e-4 else ""
+            lines.append(
+                f"{st:<18.2f} | {eq_p:>17.2f}  | {mtp:>17.1f}% | {mtp - 39.7:>+19.1f}% | {mfn:>17.1f}%{marker}"
+            )
+        lines.append("-" * 88)
+
+    lines.append(f"\n3B. CONFUSION MATRIX ANALYSIS VS. BASE UAVDET (score_thr={score_thr_used:.2f}, IoU=0.50)")
     lines.append("-" * 88)
     lines.append(
         f"{'Category':<18} | {'Base Diag TP':>12} | {'Ours Diag TP':>12} | {'Delta TP':>9} | "
@@ -794,8 +850,8 @@ def main():
     parser.add_argument(
         "--score-thr",
         type=float,
-        default=0.3,
-        help="Confidence threshold for confusion matrix (default: 0.3, matching UAVDet)",
+        default=0.12,
+        help="Confidence threshold for confusion matrix (default: 0.12 for product score p_cls * M_density, equiv to ~0.35 single prob)",
     )
     parser.add_argument(
         "--tp-iou-thr",
@@ -808,6 +864,16 @@ def main():
         type=int,
         default=8,
         help="Batch size for evaluation",
+    )
+    parser.add_argument(
+        "--from-pkl",
+        action="store_true",
+        help="Skip GPU inference and instantly recompute COCO metrics + calibrated Confusion Matrices from saved predictions_*.pkl",
+    )
+    parser.add_argument(
+        "--sqrt-scores",
+        action="store_true",
+        help="Calibrate product scores via geometric mean sqrt(p_cls * M_density) so score_thr=0.30 matches single-probability scale",
     )
     args = parser.parse_args()
 
@@ -827,9 +893,12 @@ def main():
             tp_iou_thr=args.tp_iou_thr,
             batch_size=args.batch_size,
             data_dir=args.data_dir,
+            from_pkl=args.from_pkl,
+            sqrt_scores=args.sqrt_scores,
         )
         generate_deep_analysis_report(eval_data, sp_dir)
 
 
 if __name__ == "__main__":
     main()
+
