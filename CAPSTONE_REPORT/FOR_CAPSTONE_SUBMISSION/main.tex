@@ -97,7 +97,7 @@ Project Guide}
 
 Unmanned Aerial Vehicles (UAVs) underpin traffic surveillance, search and rescue, and disaster assessment, yet aerial detection is far harder than ground-level perception. At 50--150 meters altitude, over 60.5\% of targets occupy fewer than 32 pixels, background clutter covers more than 98\% of the image, and dense inter-object occlusion is common. Thin and small categories such as pedestrians, bicycles and tricycles suffer most: convolutional detectors lose them to sampling artifacts, while Vision Transformers are too costly ($\mathcal{O}(N^2)$) for practical deployment.
 
-This project presents \textbf{UAVDet-V1}, a lightweight, physics-grounded detector with 4.39 million parameters, built on four components: (1) a tri-scale \textbf{Laplacian-of-Gaussian opponent-color prior} that separates structural boundaries from clutter and sensor noise; (2) a \textbf{Boundary-Aware Cross-Stage Partial backbone (BACSPUAV)} with Boundary-Gated Mamba blocks giving linear-time $\mathcal{O}(N)$ global context; (3) a \textbf{CSPMBFPN} feature pyramid with a coarse-to-fine scale-sequence scan; and (4) a \textbf{density-guided RTMDet head} with anisotropic box targets, which spread supervision across the full shape of elongated objects such as pedestrians and tricycles.
+This project presents \textbf{UAVDet-V1}, a lightweight, physics-grounded detector with 4.39 million parameters, built on four components: (1) a tri-scale \textbf{Laplacian-of-Gaussian opponent-color prior} that separates structural boundaries from clutter and sensor noise; (2) a \textbf{Boundary-Aware Cross-Stage Backbone} with Boundary-Gated Mamba blocks giving linear-time $\mathcal{O}(N)$ global context; (3) a \textbf{Multi-Branch Feature Pyramid} feature pyramid with a coarse-to-fine scale-sequence scan; and (4) a \textbf{density-guided RTMDet head} with anisotropic box targets, which spread supervision across the full shape of elongated objects such as pedestrians and tricycles.
 
 The model was trained and evaluated on \textbf{VisDrone2019-DET} (6,471 training, 548 validation and 1,610 test-dev images, 10 categories). After 200 epochs of distributed training on two NVIDIA RTX GPUs, it reached 25.7\% AP and 43.9\% $\text{AP}_{50}$ on the test set and 29.4\% AP on the validation set. A Stage-2 fine-tuning run with anisotropic density targets and per-step weight updates has so far raised validation AP to 31.0\% ($\text{AP}_{50}$ 51.1\%) after two epochs, with the largest gains on small and medium objects (+1.4 and +2.5 AP). Based on the validation-to-test gap observed for the baseline, the completed fine-tuning is projected to reach about 27.6\% AP and 46.5\% $\text{AP}_{50}$ on the test set, compared with 26.8\% AP for the published Base UAVDet; this figure will be replaced by the measured test result once training finishes.
 
@@ -134,8 +134,8 @@ Given an aerial video or image stream $I \in \mathbb{R}^{3 \times H \times W}$ c
 The primary aim of this Capstone project is to develop, implement, and validate a lightweight, physics-grounded State-Space aerial detector that breaks existing accuracy-latency trade-offs. The specific engineering and research objectives are:
 \begin{enumerate}[leftmargin=2em]
     \item \textbf{Physics-Grounded Pre-attentive Edge Extraction:} Design and incorporate an analytical, parameter-free Laplacian of Gaussian (LoG) Opponent-Color prior into the model's stem to decouple structural physical boundaries from deceptive surface textures.
-    \item \textbf{Linear-Time Global Sequence Modeling with Boundary Gating:} Develop a Boundary-Aware Cross-Stage Partial backbone (BACSPUAV) integrating Vision Mamba selective state spaces ($\mathcal{O}(N)$ complexity) equipped with dynamic boundary resetting gates that prevent background noise accumulation.
-    \item \textbf{Scale-Sequence Cross-Pyramid Continuity:} Construct a Multi-Branch Feature Pyramid Network (CSPMBFPN) featuring a coarse-to-fine scale-sequence scan ($S_4 \to P_3 \to P_2 \to P_1$) to maintain spatial-semantic feature continuity across 4 distinct spatial octaves.
+    \item \textbf{Linear-Time Global Sequence Modeling with Boundary Gating:} Develop a Boundary-Aware Cross-Stage Backbone integrating Vision Mamba selective state spaces ($\mathcal{O}(N)$ complexity) equipped with dynamic boundary resetting gates that prevent background noise accumulation.
+    \item \textbf{Scale-Sequence Cross-Pyramid Continuity:} Construct a Multi-Branch Feature Pyramid featuring a coarse-to-fine scale-sequence scan ($S_4 \to P_3 \to P_2 \to P_1$) to maintain spatial-semantic feature continuity across 4 distinct spatial octaves.
     \item \textbf{Density-Guided Feature Modulation and Decoupled Head:} Implement a decoupled detection head supervised by aspect-ratio-aware anisotropic Gaussian bounding-box targets to boost multi-anchor feature modulation across elongated and medium targets.
     \item \textbf{End-to-End Validation and SOTA Benchmarking:} Train, fine-tune, and evaluate the full detector on the VisDrone2019 benchmark using high-proposal evaluation ($ proposal\_nums=(500, 100, 10)$), surpassing the published Base UAVDet accuracy (26.8\% AP / 44.8\% $\text{AP}_{50}$) while restricting total model complexity to under 4.5 million parameters.
 \end{enumerate}
@@ -193,7 +193,7 @@ Liu et al., 2024~\cite{liu2024vmamba} & VMamba (Visual State-Space Model) & Glob
 \midrule
 Yang et al., 2026~\cite{yang2026uavdet} & Base UAVDet & Combines basic Mamba blocks with multi-scale feature pyramids. & Uses point Gaussian targets; lacks physical boundary gating; 7.1M parameters.\\
 \midrule
-\textbf{Our Proposed Model} & \textbf{Scale-Calibrated BACSPUAV + CSPMBFPN + LoG Prior} & \textbf{Physics-grounded LoG prior, boundary-gated Mamba, 4.39M params, linear complexity.} & \textbf{Requires calibrated training schedule to balance multi-task loss terms.}\\
+\textbf{Our Proposed Model} & \textbf{Scale-Calibrated Boundary-Aware Backbone + Multi-Branch Feature Pyramid + LoG Prior} & \textbf{Physics-grounded LoG prior, boundary-gated Mamba, 4.39M params, linear complexity.} & \textbf{Requires calibrated training schedule to balance multi-task loss terms.}\\
 \bottomrule
 \end{tabular}%
 }
@@ -307,8 +307,8 @@ To overcome these foundational roadblocks, the proposed system introduces a unif
 Figure~\ref{fig:system_arch} illustrates the complete end-to-end architecture of our model. Operating as a unified, single-stage anchor-free detector, the framework comprises four interconnected components:
 \begin{enumerate}[leftmargin=2em]
     \item \textbf{Analytical LoG Opponent-Color Stem Prior (Module 1):} Extracts high-frequency scale-space physical contours directly from the raw RGB input.
-    \item \textbf{Boundary-Aware Cross-Stage Partial Backbone (BACSPUAV, Module 2):} Processes hierarchical feature stages ($P_1$ through $P_5$) using selective state-space sequences gated by physical boundary strengths.
-    \item \textbf{Scale-Sequence Multi-Branch FPN (CSPMBFPN, Module 3):} Aggregates multi-scale pyramid features through a continuous Coarse-to-Fine State-Space Scan ($S_4 \to P_3 \to P_2 \to P_1$).
+    \item \textbf{Boundary-Aware Cross-Stage Partial Backbone (Boundary-Aware Backbone, Module 2):} Processes hierarchical feature stages ($P_1$ through $P_5$) using selective state-space sequences gated by physical boundary strengths.
+    \item \textbf{Multi-Branch Feature Pyramid (Module 3):} Aggregates multi-scale pyramid features through a continuous Coarse-to-Fine State-Space Scan ($S_4 \to P_3 \to P_2 \to P_1$).
     \item \textbf{Density-Guided RTMDet Decoupled Head (Module 4):} Performs residual feature modulation and decoupled classification/regression with anisotropic box Gaussian supervision.
 \end{enumerate}
 
@@ -317,7 +317,7 @@ Figure~\ref{fig:system_arch} illustrates the complete end-to-end architecture of
     \IfFileExists{epoch158_val_and_heatmap.png}
     {\includegraphics[width=0.95\textwidth]{epoch158_val_and_heatmap.png}}
     {\fbox{\parbox[c][5cm][c]{0.9\textwidth}{\centering \textbf{Figure: Full System Architecture Diagram}}}}
-    \caption{Detailed architectural workflow of our model showing the LoG Stem Prior, BACSPUAV backbone with Boundary-Gated Mamba blocks, CSPMBFPN neck, and Density-Guided Decoupled Head.}
+    \caption{Detailed architectural workflow of our model showing the LoG Stem Prior, boundary-aware backbone with Boundary-Gated Mamba blocks, multi-branch pyramid neck, and Density-Guided Decoupled Head.}
     \label{fig:system_arch}
 \end{figure}
 
@@ -328,7 +328,7 @@ To break target camouflage where RGB pixel contrast vanishes ($|\Delta I_{\text{
 \end{equation}
 The kernels are pre-computed analytically, normalized such that $\sum K = 0$, and initialized as frozen convolutional weights inside the stem. Because high-frequency physical material boundaries produce invariant zero-crossings regardless of shadows or paint camouflage, the resulting prior map $M_{\text{LoG}} \in \mathbb{R}^{1 \times H \times W}$ supplies an unambiguous structural cue that guides initial feature extraction.
 
-\subsection{Module 2: Boundary-Aware Cross-Stage Backbone (BACSPUAV)}
+\subsection{Module 2: Boundary-Aware Cross-Stage Backbone}
 Standard Vision Mamba flattens 2D features into 1D sequences $x_1, \dots, x_T$ and applies continuous linear state-space recurrence:
 \begin{equation}
     h_t = \mathbf{\bar{A}}_t h_{t-1} + \mathbf{\bar{B}}_t x_t, \quad y_t = \mathbf{\bar{C}}_t h_t + \mathbf{\bar{D}}_t x_t
@@ -339,8 +339,8 @@ where $\mathbf{\bar{A}}_t = \exp(\Delta_t \mathbf{A})$. To prevent vast expanses
 \end{equation}
 When the scan trajectory crosses a sharp object-to-background transition ($s_t \gg 0$), $g_t \to 0$, driving $\mathbf{\bar{A}}'_t \to \mathbf{I}$ (or resetting $h_t \to 0$). This dynamically isolates foreground targets from background clutter while preserving exact parallel scan associativity ($\mathcal{O}(N)$ complexity).
 
-\subsection{Module 3: CSPMBFPN with Coarse-to-Fine Scale Sequence Scan}
-Standard FPNs propagate features only between adjacent levels ($P_i \leftrightarrow P_{i+1}$), failing to establish continuity between high-level semantics ($P_4$) and ultra-fine small-object features ($P_1$, stride 4). Our \textbf{CSPMBFPN} arranges multi-scale feature maps into an ordered scale-sequence:
+\subsection{Module 3: Multi-Branch Feature Pyramid with Scale-Sequence Scan}
+Standard FPNs propagate features only between adjacent levels ($P_i \leftrightarrow P_{i+1}$), failing to establish continuity between high-level semantics ($P_4$) and ultra-fine small-object features ($P_1$, stride 4). Our \textbf{Multi-Branch Feature Pyramid} arranges multi-scale feature maps into an ordered scale-sequence:
 \begin{equation}
     \mathcal{S} = [S_4(P_4), S_3(P_3), S_2(P_2), S_1(P_1)]
 \end{equation}
@@ -363,8 +363,8 @@ where $\sigma_x = \max((2r_x + 1)/4.0, 0.75)$ and $\sigma_y = \max((2r_y + 1)/4.
 The operational pipeline proceeds through four disciplined execution stages:
 \begin{enumerate}[leftmargin=2em]
     \item \textbf{Image Ingestion and LoG Decomposition:} The airborne frame $I \in \mathbb{R}^{3 \times H \times W}$ is split into an RGB path and an analytical LoG filter bank. The resulting pre-attentive edge map is fused into the stem to suppress sensor noise.
-    \item \textbf{Hierarchical Boundary-Gated State-Space Extraction:} The fused tokens propagate through the BACSPUAV stages (strides 4, 8, 16, 32). Boundary gates evaluate terrain transitions, ensuring state resets across background-to-object frontiers.
-    \item \textbf{Cross-Scale Sequence Alignment:} Pyramid stages are flattened into an inter-scale sequence and processed by the scale-axis scan in CSPMBFPN, propagating high-level semantic context down to high-resolution stride-4 maps.
+    \item \textbf{Hierarchical Boundary-Gated State-Space Extraction:} The fused tokens propagate through the backbone stages (strides 4, 8, 16, 32). Boundary gates evaluate terrain transitions, ensuring state resets across background-to-object frontiers.
+    \item \textbf{Cross-Scale Sequence Alignment:} Pyramid stages are flattened into an inter-scale sequence and processed by the scale-axis scan in the feature pyramid, propagating high-level semantic context down to high-resolution stride-4 maps.
     \item \textbf{Anchor-Free Prediction and Dynamic Assignment:} Decoupled heads evaluate classification with Quality Focal Loss and regression with GIoU loss under dynamic soft label assignment. Non-maximum suppression (NMS) yields the final bounding box outputs.
 \end{enumerate}
 
