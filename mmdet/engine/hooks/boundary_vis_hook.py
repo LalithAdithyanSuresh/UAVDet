@@ -2,7 +2,7 @@
 import os
 import os.path as osp
 import time
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
