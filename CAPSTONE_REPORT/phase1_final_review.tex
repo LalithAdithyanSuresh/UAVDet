@@ -1,0 +1,204 @@
+\documentclass[12pt,a4paper]{report}
+
+\usepackage[left=1.5in,right=1in,top=1in,bottom=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{setspace}
+\usepackage{url}
+
+\onehalfspacing
+\renewcommand{\arraystretch}{1.2}
+
+\begin{document}
+
+% =========================================================
+% TITLE PAGE
+% =========================================================
+
+\begin{titlepage}
+
+% \begin{center}
+% \begin{tabular}{@{}>{\centering\arraybackslash}m{0.27\textwidth}
+%                     >{\centering\arraybackslash}m{0.68\textwidth}@{}}
+
+% \IfFileExists{SNU-logo.png}
+% {\includegraphics[width=4cm]{SNU-logo.png}}
+% {\fbox{\parbox[c][2cm][c]{3.5cm}{\centering SNU-logo.png}}}
+
+% &
+
+% \begin{minipage}{\linewidth}
+\centering
+{\large \textbf{Shiv Nadar University-Chennai}}\\[0.1cm]
+{\normalsize Kalavakkam, Tamil Nadu - 603110, India}\\[0.1cm]
+{\normalsize Website: \texttt{www.snuchennai.edu.in}}
+% \end{minipage}
+
+% \end{tabular}
+% \end{center}
+
+\vspace{0.2cm}
+\hrule
+% \vspace{1cm}
+
+\begin{center}
+
+{\large \textbf{Department of Computer Science and Engineering }}\\[1cm]
+
+{\large \textbf{CAPSTONE PROJECT REPORT}}\\
+
+{\large \textbf{Phase 1 - Final Review}}\\[1cm]
+
+
+{\large \textbf{TITLE OF THE PROJECT}}\\[1cm]
+
+{\large \textbf{Submitted by}}\\[0.3cm]
+
+\begin{tabular}{p{6cm}p{5cm}}
+\toprule
+\centering \textbf{Student Name} &
+\centering \arraybackslash \textbf{Registration Number}\\
+\midrule
+\centering Student Name 1 &
+\centering \arraybackslash Registration Number 1\\
+\centering Student Name 2 &
+\centering \arraybackslash Registration Number 2\\
+\bottomrule
+\end{tabular}
+
+\vfill
+
+{\large \textbf{Under the guidance of}}\\[0.2cm]
+{\large Dr.\ Faculty Guide}\\
+Assistant Professor\\
+\vspace{0.6cm}
+% \begin{center}
+\begin{tabular}{c}
+Approved By: \\
+(Guide Signature with Date) \\
+ \\
+\shortstack{\rule{4cm}{0.4pt}\\
+Dr.\ Faculty Guide\\
+Project Guide}
+\end{tabular}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.25\linewidth]{SNU-logo.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\vfill
+
+
+
+\end{center}
+\end{titlepage}
+
+% =========================================================
+% CERTIFICATE
+% =========================================================
+
+\pagenumbering{roman}
+
+\chapter*{Executive Summary}
+
+Provide a concise, one-page overview of the proposed project, including the problem being addressed, project objectives, proposed methodology, and expected outcomes.
+Highlight the significance of the project, its key features, and potential applications, ensuring that the summary gives a clear understanding of the entire project without excessive technical details.
+
+\chapter{Introduction}
+
+\section{Background}
+Describe the background and context of the project.
+
+\section{Problem Statement}
+State the problem addressed by the project clearly.
+
+\section{Objectives}
+\begin{enumerate}
+    \item State the first objective.
+    \item State the second objective.
+    \item State the third objective.
+\end{enumerate}
+
+\section{Scope}
+Describe the scope, assumptions, and limitations of the project.
+
+\chapter{Literature Review}
+
+\section{Existing Work}
+Discuss relevant research papers, systems, standards, and existing solutions.
+
+\section{Comparison of Existing Approaches}
+
+\begin{table}[h]
+\centering
+\caption{Comparison of existing approaches}
+\begin{tabular}{@{}p{3cm}p{4cm}p{3cm}p{3cm}@{}}
+\toprule
+\textbf{Reference} & \textbf{Approach} & \textbf{Strength} &
+\textbf{Limitation}\\
+\midrule
+Author, Year & Method used & Main strength & Main limitation\\
+Author, Year & Method used & Main strength & Main limitation\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Research Gap}
+Explain the limitation in existing work that the project addresses.
+
+\section{Research Gap-to-Motivation Mapping}
+Explain how your motivation can address the identified research gap.
+
+\chapter{Dataset / Simulation Details}
+% which ever is suitable for your project
+\section{Dataset or Simulation Environment}
+Describe the dataset used or the simulation environment developed
+for the project. Explain its relevance to the problem being addressed.
+
+\section{Dataset Description / Simulation Configuration}
+Provide details such as dataset source, size, features, labels,
+data format, or simulation tools, parameters, and configurations.
+
+\section{Data Collection and Preprocessing}
+Explain how the data was collected, cleaned, transformed, or prepared.
+For simulation-based projects, describe the setup and initial conditions.
+
+\section{Dataset Characteristics / Simulation Parameters}
+Present the important characteristics of the dataset or parameters
+used in the simulation. Include tables or figures wherever necessary.
+
+\section{Assumptions and Limitations}
+State the assumptions made while preparing the dataset or simulation.
+Discuss limitations that may affect the results or generalizability.
+
+
+\chapter{System Model}
+
+\section{System Overview}
+Describe the proposed system and its major components.
+Explain how the system addresses the identified problem.
+
+\section{System Architecture}
+Present the overall architecture using a suitable block diagram.
+Explain the role of each component and its interactions.
+
+\section{System Workflow}
+Describe the step-by-step operation of the proposed system.
+Include a flowchart or sequence diagram wherever appropriate.
+
+\chapter{Feasibility Study}
+Evaluate whether the proposed project can be successfully implemented considering technical requirements, available resources, cost, and time constraints.
+Discuss potential challenges, limitations, and possible solutions to establish the practicality of the project.
+
+\chapter{Proposed Timeline}
+Provide a phase-wise schedule of the project, highlighting major activities such as research, design, implementation, testing, and documentation.
+Include expected completion dates, milestones, and deliverables for each phase, preferably using a Gantt chart.
+
+
+
+\end{document}
