@@ -698,6 +698,8 @@ def launch_training(config_file, num_gpus=None, resume=False, port=29500):
                         current_bs = int(part.split("=")[1])
                     elif part.startswith("accumulative_counts="):
                         current_accum = int(part.split("=")[1])
+        target_eff_bs = current_bs * max(1, num_gpus) * current_accum
+        print(f"[Pre-Flight Probe] Configured target effective batch size = {target_eff_bs} (bs={current_bs} x {max(1, num_gpus)} GPUs x accum={current_accum})")
     except Exception as e:
         print(f"[Pre-Flight Probe Notice] Proceeding with default batch_size={current_bs} ({e})")
 

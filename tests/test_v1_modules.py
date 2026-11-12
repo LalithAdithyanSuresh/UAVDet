@@ -89,8 +89,11 @@ if 'mmengine' not in sys.modules:
         mmengine_model.bias_init_with_prob = lambda p: float(-math.log((1 - p) / p))
         mmengine_model.constant_init = lambda m, val, bias=0: None
         mmengine_model.normal_init = lambda m, mean=0, std=1, bias=0: None
+        mmengine_structures = types.ModuleType('mmengine.structures')
+        mmengine_structures.InstanceData = dict
         sys.modules['mmengine'] = mmengine_mod
         sys.modules['mmengine.model'] = mmengine_model
+        sys.modules['mmengine.structures'] = mmengine_structures
 
 pkg = types.ModuleType('mmdet.models.layers')
 pkg.__path__ = [layers_dir]
@@ -133,6 +136,51 @@ mod_gt = importlib.util.module_from_spec(spec_gt)
 sys.modules["mmdet.models.utils.gaussian_target"] = mod_gt
 spec_gt.loader.exec_module(mod_gt)
 
+
+dense_heads_dir = os.path.join(repo_root, 'mmdet', 'models', 'dense_heads')
+losses_dir = os.path.join(repo_root, 'mmdet', 'models', 'losses')
+
+dense_heads_pkg = types.ModuleType('mmdet.models.dense_heads')
+dense_heads_pkg.__path__ = [dense_heads_dir]
+losses_pkg = types.ModuleType('mmdet.models.losses')
+losses_pkg.__path__ = [losses_dir]
+
+sys.modules['mmdet.models.dense_heads'] = dense_heads_pkg
+sys.modules['mmdet.models.losses'] = losses_pkg
+
+class DummyRTMDetSepBNHead(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.prior_generator = types.SimpleNamespace(strides=[4, 8, 16])
+        self.use_depthwise = False
+        self.feat_channels = 96
+        self.conv_cfg = None
+        self.norm_cfg = None
+        self.act_cfg = None
+    def _init_layers(self):
+        pass
+    def init_weights(self):
+        pass
+
+rtmdet_head_mod = types.ModuleType('mmdet.models.dense_heads.rtmdet_head')
+rtmdet_head_mod.RTMDetSepBNHead = DummyRTMDetSepBNHead
+sys.modules['mmdet.models.dense_heads.rtmdet_head'] = rtmdet_head_mod
+
+gfl_mod = types.ModuleType('mmdet.models.losses.gaussian_focal_loss')
+class DummyGaussianFocalLoss(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+    def forward(self, *args, **kwargs):
+        return torch.tensor(0.0)
+gfl_mod.GaussianFocalLoss = DummyGaussianFocalLoss
+sys.modules['mmdet.models.losses.gaussian_focal_loss'] = gfl_mod
+
+structures_mod = types.ModuleType('mmdet.structures')
+structures_mod.SampleList = list
+structures_mod.InstanceData = dict
+structures_mod.InstanceList = list
+structures_mod.OptInstanceList = list
+sys.modules['mmdet.structures'] = structures_mod
 
 def import_module_from_file(full_name, file_path):
     spec = importlib.util.spec_from_file_location(full_name, file_path)
@@ -328,6 +376,32 @@ def test_gaussian_target_generation():
     print("Gaussian Target Generation Unit Test -> PASSED")
 
 
+def test_anisotropic_box_gaussian_target():
+    print("Testing Anisotropic Box Gaussian target generation for density head...")
+    density_head_mod = import_module_from_file(
+        "mmdet.models.dense_heads.density_rtmdet_head",
+        os.path.join(dense_heads_dir, "density_rtmdet_head.py")
+    )
+    gen_box_gaussian_target = density_head_mod.gen_box_gaussian_target
+    heatmap = torch.zeros(64, 64)
+    # Elongated box (e.g. bus or truck: width=30, height=10)
+    box = [15.0, 25.0, 45.0, 35.0]
+    gen_box_gaussian_target(heatmap, box, sigma_ratio=4.0)
+    # Center must be peak
+    cx, cy = 30, 30
+    assert heatmap[cy, cx].item() > 0.95, f"Center value {heatmap[cy, cx]} is not peak"
+    # Off-center anchors inside box must have positive non-zero target
+    assert heatmap[cy, 20].item() > 0.15, f"Left anchor inside box is too low: {heatmap[cy, 20]}"
+    assert heatmap[cy, 40].item() > 0.15, f"Right anchor inside box is too low: {heatmap[cy, 40]}"
+    # Background outside box must drop toward zero
+    assert heatmap[cy, 5].item() < 0.05, f"Background outside box is not suppressed: {heatmap[cy, 5]}"
+    # Edge cases (partially out of bounds or totally out)
+    gen_box_gaussian_target(heatmap, [-10.0, -5.0, 10.0, 15.0])
+    gen_box_gaussian_target(heatmap, [60.0, 60.0, 75.0, 80.0])
+    gen_box_gaussian_target(heatmap, [-20.0, -20.0, -5.0, -5.0])
+    print("Anisotropic Box Gaussian Target Generation -> PASSED")
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("Running UAVDet V1 Mathematical & Architectural Unit Tests")
@@ -338,6 +412,7 @@ if __name__ == '__main__':
     test_exact_delta_decomposition_math()
     test_full_backbone_and_neck_ddp_gradients()
     test_gaussian_target_generation()
+    test_anisotropic_box_gaussian_target()
     print("=" * 60)
     print("ALL TESTS PASSED SUCCESSFULLY!")
     print("=" * 60)

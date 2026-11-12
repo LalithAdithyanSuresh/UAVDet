@@ -17,6 +17,63 @@ from mmdet.models.utils.gaussian_target import gen_gaussian_target, gaussian_rad
 from .rtmdet_head import RTMDetSepBNHead
 
 
+def gaussian1D(radius: int, sigma: float = 1.0, dtype=torch.float32, device='cpu') -> Tensor:
+    """Generate 1D Gaussian kernel."""
+    x = torch.arange(-radius, radius + 1, dtype=dtype, device=device)
+    h = (-(x * x) / (2.0 * sigma * sigma)).exp()
+    return h
+
+
+def gen_box_gaussian_target(
+    heatmap: Tensor,
+    box: List[float],
+    sigma_ratio: float = 4.0,
+    min_radius: int = 1,
+    k: float = 1.0
+) -> Tensor:
+    """Generate aspect-ratio-aware anisotropic 2D Gaussian target covering a GT box.
+
+    Unlike single-pixel isotropic center Gaussians, this creates smooth foreground
+    modulation energy across all positive anchors assigned to the object, preserving
+    detection of elongated (buses, trucks) and medium/large objects.
+    """
+    H, W = heatmap.shape
+    x1, y1, x2, y2 = box
+    w = max(float(x2 - x1), 1.0)
+    h = max(float(y2 - y1), 1.0)
+
+    # Anisotropic radii: half-width and half-height
+    rx = max(int(round(w * 0.5)), min_radius)
+    ry = max(int(round(h * 0.5)), min_radius)
+
+    # sigma_ratio=4.0 provides ~0.135 target value at box boundary and smooth foreground plateau
+    sigma_x = max((2.0 * rx + 1.0) / sigma_ratio, 0.75)
+    sigma_y = max((2.0 * ry + 1.0) / sigma_ratio, 0.75)
+
+    kx = gaussian1D(rx, sigma=sigma_x, dtype=heatmap.dtype, device=heatmap.device).unsqueeze(0)
+    ky = gaussian1D(ry, sigma=sigma_y, dtype=heatmap.dtype, device=heatmap.device).unsqueeze(1)
+    gaussian_kernel = ky * kx
+
+    cx = int(round(float((x1 + x2) * 0.5)))
+    cy = int(round(float((y1 + y2) * 0.5)))
+
+    if cx < 0 or cy < 0 or cx >= W or cy >= H:
+        return heatmap
+
+    left, right = min(cx, rx), min(W - cx, rx + 1)
+    top, bottom = min(cy, ry), min(H - cy, ry + 1)
+
+    masked_heatmap = heatmap[cy - top:cy + bottom, cx - left:cx + right]
+    masked_gaussian = gaussian_kernel[ry - top:ry + bottom, rx - left:rx + right]
+
+    torch.maximum(
+        masked_heatmap,
+        masked_gaussian * k,
+        out=heatmap[cy - top:cy + bottom, cx - left:cx + right]
+    )
+    return heatmap
+
+
 @MODELS.register_module()
 class DensityRTMDetSepBNHead(RTMDetSepBNHead):
     """Density-Guided RTMDet Head with Separated BN (UAVDet V1 Module 4).
@@ -40,8 +97,10 @@ class DensityRTMDetSepBNHead(RTMDetSepBNHead):
         loss_density_weight: float = 1.0,
         min_gaussian_radius: int = 1,
         min_overlap: float = 0.3,
-        use_density_at_test: bool = True,
+        use_density_at_test: bool = False,
         use_feature_modulation: bool = True,
+        density_target_type: str = 'anisotropic_box',
+        density_sigma_ratio: float = 4.0,
         **kwargs
     ):
         self.loss_density_weight = loss_density_weight
@@ -49,6 +108,8 @@ class DensityRTMDetSepBNHead(RTMDetSepBNHead):
         self.min_overlap = min_overlap
         self.use_density_at_test = use_density_at_test
         self.use_feature_modulation = use_feature_modulation
+        self.density_target_type = density_target_type
+        self.density_sigma_ratio = density_sigma_ratio
         super().__init__(num_classes=num_classes, in_channels=in_channels, **kwargs)
         self.density_loss_fn = GaussianFocalLoss(loss_weight=self.loss_density_weight)
         self.last_density_maps = []
@@ -163,25 +224,35 @@ class DensityRTMDetSepBNHead(RTMDetSepBNHead):
 
             for img_idx in range(num_imgs):
                 gt_bboxes = gt_boxes_cpu[img_idx]
-                if gt_bboxes is None:
+                if gt_bboxes is None or len(gt_bboxes) == 0:
                     continue
 
                 scaled_boxes = gt_bboxes / stride_val
-                wh = (scaled_boxes[:, 2:4] - scaled_boxes[:, 0:2]).tolist()
-                centers = ((scaled_boxes[:, 0:2] + scaled_boxes[:, 2:4]) * 0.5).tolist()
 
-                for (w, h), (cx, cy) in zip(wh, centers):
-                    if w <= 0 or h <= 0:
-                        continue
-                    ctx_int = int(round(cx))
-                    cty_int = int(round(cy))
-                    if ctx_int < 0 or ctx_int >= W or cty_int < 0 or cty_int >= H:
-                        continue
-                    r = max(
-                        gaussian_radius((math.ceil(h), math.ceil(w)), min_overlap=self.min_overlap),
-                        self.min_gaussian_radius
-                    )
-                    gen_gaussian_target(target_heatmaps_cpu[img_idx, 0], [ctx_int, cty_int], int(r))
+                if self.density_target_type == 'anisotropic_box':
+                    for box in scaled_boxes.tolist():
+                        gen_box_gaussian_target(
+                            target_heatmaps_cpu[img_idx, 0],
+                            box,
+                            sigma_ratio=self.density_sigma_ratio,
+                            min_radius=self.min_gaussian_radius
+                        )
+                else:
+                    wh = (scaled_boxes[:, 2:4] - scaled_boxes[:, 0:2]).tolist()
+                    centers = ((scaled_boxes[:, 0:2] + scaled_boxes[:, 2:4]) * 0.5).tolist()
+
+                    for (w, h), (cx, cy) in zip(wh, centers):
+                        if w <= 0 or h <= 0:
+                            continue
+                        ctx_int = int(round(cx))
+                        cty_int = int(round(cy))
+                        if ctx_int < 0 or ctx_int >= W or cty_int < 0 or cty_int >= H:
+                            continue
+                        r = max(
+                            gaussian_radius((math.ceil(h), math.ceil(w)), min_overlap=self.min_overlap),
+                            self.min_gaussian_radius
+                        )
+                        gen_gaussian_target(target_heatmaps_cpu[img_idx, 0], [ctx_int, cty_int], int(r))
 
             target_heatmaps = target_heatmaps_cpu.to(device=logit.device, non_blocking=True)
             # GaussianFocalLoss expects sigmoid probabilities in (0, 1); clamp to avoid log(0) in fp16

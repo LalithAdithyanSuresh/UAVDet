@@ -121,3 +121,11 @@ work_dirs/
 *.pth
 *.py~
 *.sh~
+
+# LaTeX
+*.aux
+*.out
+*.synctex.gz
+*.toc
+*.fls
+*.fdb_latexmk
